@@ -86,7 +86,9 @@ def format_tickets_display(tickets):
     for ticket in tickets:
         balls_str = ticket['balls_str']
         stars_str = ticket['stars_str']
-        display_lines.append(f"**{ticket['ticket_id']}.** {balls_str} | ⭐ {stars_str}")
+        # Format avec séparation visuelle claire et numéros à la ligne
+        ticket_display = f"🎫 **Ticket {ticket['ticket_id']}**\n\n   {balls_str}\n   ⭐ {stars_str}"
+        display_lines.append(ticket_display)
     
     return '\n\n'.join(display_lines)
 
@@ -388,7 +390,231 @@ def main():
     
     st.markdown("---")
     
-    # Section 5: History
+    # Section 5: Manual Draw Entry
+    st.header("➕ Ajouter un tirage manuellement")
+    
+    with st.expander("📝 Saisir un nouveau tirage", expanded=False):
+        st.subheader("Informations du tirage")
+        
+        # Date input
+        draw_date = st.date_input(
+            "Date du tirage",
+            value=datetime.now().date(),
+            help="Date du tirage officiel"
+        )
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("🎱 Numéros principaux (1-50)")
+            main_numbers = []
+            
+            # 5 number inputs for main numbers
+            for i in range(5):
+                num = st.number_input(
+                    f"Numéro {i+1}",
+                    min_value=1,
+                    max_value=50,
+                    value=1,
+                    key=f"main_{i}",
+                    help=f"Numéro principal {i+1} (entre 1 et 50)"
+                )
+                main_numbers.append(num)
+        
+        with col2:
+            st.subheader("⭐ Étoiles (1-12)")
+            stars = []
+            
+            # 2 star inputs
+            for i in range(2):
+                star = st.number_input(
+                    f"Étoile {i+1}",
+                    min_value=1,
+                    max_value=12,
+                    value=1,
+                    key=f"star_{i}",
+                    help=f"Étoile {i+1} (entre 1 et 12)"
+                )
+                stars.append(star)
+        
+        # Validation and preview
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Validate inputs
+            main_numbers_sorted = sorted(main_numbers)
+            stars_sorted = sorted(stars)
+            
+            # Check for duplicates in main numbers
+            main_duplicates = len(main_numbers) != len(set(main_numbers))
+            # Check for duplicates in stars
+            star_duplicates = len(stars) != len(set(stars))
+            
+            if main_duplicates:
+                st.error("❌ Les numéros principaux doivent être différents")
+            elif star_duplicates:
+                st.error("❌ Les étoiles doivent être différentes")
+            else:
+                st.success("✅ Tirage valide")
+                
+                # Preview
+                st.info(f"**Aperçu:** {' - '.join(map(str, main_numbers_sorted))} | ⭐ {' - '.join(map(str, stars_sorted))}")
+        
+        with col2:
+            # Add button
+            if st.button("💾 Ajouter le tirage", disabled=main_duplicates or star_duplicates):
+                with st.spinner("Ajout du tirage en cours..."):
+                    try:
+                        # Import here to avoid circular imports
+                        from repository import EuromillionsRepository
+                        
+                        # Create draw ID
+                        draw_id = f"EM-{draw_date.strftime('%Y-%m-%d')}"
+                        
+                        # Prepare draw data
+                        draw_data = {
+                            'draw_id': draw_id,
+                            'draw_date': draw_date.strftime('%Y-%m-%d'),
+                            'n1': main_numbers_sorted[0],
+                            'n2': main_numbers_sorted[1],
+                            'n3': main_numbers_sorted[2],
+                            'n4': main_numbers_sorted[3],
+                            'n5': main_numbers_sorted[4],
+                            's1': stars_sorted[0],
+                            's2': stars_sorted[1],
+                            'jackpot': None,
+                            'prize_table': None,
+                            'raw_html': None
+                        }
+                        
+                        # Save to database
+                        repo = EuromillionsRepository()
+                        result = repo.upsert_draws([draw_data])
+                        
+                        if result['inserted'] > 0:
+                            st.success(f"✅ Tirage ajouté avec succès ! (ID: {draw_id})")
+                            st.info("💡 Pensez à re-entraîner les modèles pour inclure ce nouveau tirage")
+                        elif result['updated'] > 0:
+                            st.warning(f"⚠️ Tirage existant mis à jour (ID: {draw_id})")
+                        else:
+                            st.error("❌ Échec de l'ajout du tirage")
+                            
+                    except Exception as e:
+                        st.error(f"❌ Erreur lors de l'ajout: {e}")
+    
+    st.markdown("---")
+    
+    # Section 6: CSV Import
+    st.header("📄 Import CSV")
+    
+    with st.expander("📂 Importer des tirages depuis un fichier CSV", expanded=False):
+        st.subheader("Téléchargement de fichier CSV")
+        
+        uploaded_file = st.file_uploader(
+            "Choisissez un fichier CSV FDJ",
+            type=['csv'],
+            help="Fichier CSV au format FDJ avec les tirages EuroMillions"
+        )
+        
+        if uploaded_file is not None:
+            # Preview file content
+            try:
+                # Read a few lines for preview
+                import io
+                
+                # Reset file pointer
+                uploaded_file.seek(0)
+                content = uploaded_file.read()
+                
+                # Try different encodings
+                encodings = ['utf-8', 'latin1', 'cp1252']
+                df_preview = None
+                used_encoding = None
+                
+                for encoding in encodings:
+                    try:
+                        uploaded_file.seek(0)
+                        df_preview = pd.read_csv(io.StringIO(content.decode(encoding)), nrows=5)
+                        used_encoding = encoding
+                        break
+                    except:
+                        continue
+                
+                if df_preview is not None:
+                    st.subheader("Aperçu du fichier")
+                    st.dataframe(df_preview, use_container_width=True)
+                    
+                    # Calculer le nombre de lignes sans backslash dans f-string
+                    line_count = len(content.decode(used_encoding).split('\n'))
+                    st.caption(f"Encodage détecté: {used_encoding} | Lignes totales: {line_count}")
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if st.button("🔍 Analyser le fichier complet"):
+                            with st.spinner("Analyse du fichier..."):
+                                try:
+                                    uploaded_file.seek(0)
+                                    df_full = pd.read_csv(io.StringIO(content.decode(used_encoding)))
+                                    
+                                    st.subheader("Statistiques du fichier")
+                                    st.metric("Nombre de lignes", len(df_full))
+                                    st.metric("Nombre de colonnes", len(df_full.columns))
+                                    
+                                    # Show column names
+                                    st.subheader("Colonnes détectées")
+                                    st.write(list(df_full.columns))
+                                    
+                                except Exception as e:
+                                    st.error(f"Erreur lors de l'analyse: {e}")
+                    
+                    with col2:
+                        if st.button("📥 Importer les données"):
+                            with st.spinner("Import des données en cours..."):
+                                try:
+                                    # Save temporarily and import
+                                    import tempfile
+                                    import os
+                                    
+                                    # Create temporary file
+                                    with tempfile.NamedTemporaryFile(mode='wb', suffix='.csv', delete=False) as tmp_file:
+                                        uploaded_file.seek(0)
+                                        tmp_file.write(uploaded_file.read())
+                                        temp_path = tmp_file.name
+                                    
+                                    # Import using existing function
+                                    import subprocess
+                                    import sys
+                                    
+                                    # Run import script
+                                    result = subprocess.run([
+                                        sys.executable, 'import_fdj_special.py', temp_path
+                                    ], capture_output=True, text=True, cwd=os.getcwd())
+                                    
+                                    # Clean up
+                                    os.unlink(temp_path)
+                                    
+                                    if result.returncode == 0:
+                                        st.success("✅ Import réussi !")
+                                        st.text("Sortie:")
+                                        st.code(result.stdout)
+                                        st.info("💡 Pensez à re-entraîner les modèles avec les nouvelles données")
+                                    else:
+                                        st.error("❌ Échec de l'import")
+                                        st.text("Erreur:")
+                                        st.code(result.stderr)
+                                        
+                                except Exception as e:
+                                    st.error(f"❌ Erreur lors de l'import: {e}")
+                else:
+                    st.error("❌ Impossible de lire le fichier. Vérifiez le format CSV.")
+                    
+            except Exception as e:
+                st.error(f"❌ Erreur lors de la lecture du fichier: {e}")
+    
+    st.markdown("---")
+    
+    # Section 7: History
     st.header("🗂️ Historique")
     
     col1, col2 = st.columns(2)

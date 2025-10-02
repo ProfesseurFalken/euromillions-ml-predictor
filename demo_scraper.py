@@ -12,6 +12,7 @@ class MockEuromillionsScraper:
     def __init__(self):
         """Initialize mock scraper."""
         self.base_date = datetime(2024, 1, 5)  # Start from first draw of 2024
+        self.max_date = datetime.now() - timedelta(days=3)  # Don't go beyond recent past
     
     def list_recent_draw_urls(self, limit: int = 20) -> List[str]:
         """Generate mock URLs for recent draws."""
@@ -22,6 +23,10 @@ class MockEuromillionsScraper:
             # Euromillions draws are typically Tuesday and Friday
             while current_date.weekday() not in [1, 4]:  # Tuesday=1, Friday=4
                 current_date += timedelta(days=1)
+            
+            # Stop if we've reached the maximum allowed date
+            if current_date > self.max_date:
+                break
             
             date_str = current_date.strftime('%Y-%m-%d')
             url = f"https://www.euro-millions.com/results/{date_str}"

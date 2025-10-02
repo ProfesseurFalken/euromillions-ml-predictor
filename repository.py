@@ -142,9 +142,17 @@ class EuromillionsRepository:
                     exists = cursor.fetchone() is not None
                     
                     # Prepare data with proper JSON serialization
+                    # Ensure draw_date is in string format
+                    draw_date = draw["draw_date"]
+                    if hasattr(draw_date, 'strftime'):
+                        draw_date = draw_date.strftime('%Y-%m-%d')
+                    elif isinstance(draw_date, str) and len(draw_date) > 10:
+                        # Handle datetime strings that might include time
+                        draw_date = draw_date[:10]
+                    
                     draw_data = {
                         "draw_id": draw["draw_id"],
-                        "draw_date": draw["draw_date"],
+                        "draw_date": draw_date,
                         "n1": draw["n1"],
                         "n2": draw["n2"], 
                         "n3": draw["n3"],
@@ -203,7 +211,11 @@ class EuromillionsRepository:
             )
             
             # Convert draw_date to datetime for better handling
-            df["draw_date"] = pd.to_datetime(df["draw_date"], format='%Y-%m-%d', errors='coerce')
+            # Handle both string and datetime formats
+            df["draw_date"] = pd.to_datetime(df["draw_date"], errors='coerce')
+            
+            # Remove rows with invalid dates
+            df = df.dropna(subset=['draw_date'])
             
             return df
     

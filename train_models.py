@@ -64,6 +64,16 @@ class EuromillionsTrainer:
         
         logger.info(f"Loaded {len(df)} draws from {df['draw_date'].min()} to {df['draw_date'].max()}")
         
+        # Filter to modern rules (post-2016) to avoid star 12 issues in cross-validation
+        cutoff_date = '2016-09-27'
+        modern_df = df[df['draw_date'] >= cutoff_date].copy()
+        
+        if len(modern_df) >= 200:  # Use modern data if we have enough
+            df = modern_df
+            logger.info(f"Using modern rules data: {len(df)} draws from {df['draw_date'].min()}")
+        else:
+            logger.warning(f"Not enough modern data ({len(modern_df)}), using all data with potential cross-validation issues")
+        
         # Build datasets
         X_main, y_main, X_star, y_star, meta = build_enhanced_datasets(
             df, window_size=min(100, len(df) // 3)
