@@ -31,6 +31,10 @@ from streamlit_adapters import (
     get_system_status
 )
 
+# Import backtesting functionality
+import numpy as np
+from typing import Dict, List, Any
+
 # Page configuration
 st.set_page_config(
     page_title="EuroMillions — Console Graphique", 
@@ -115,6 +119,266 @@ def format_tickets_display(tickets):
         display_lines.append(ticket_display)
     
     return '\n\n---\n\n'.join(display_lines)
+
+
+def _generate_tickets_fast(n: int, method: str, seed: int, main_scores: dict, star_scores: dict) -> List[dict]:
+    """
+    Génère des tickets RAPIDEMENT en utilisant des probabilités précalculées.
+    Évite le rechargement des modèles ML à chaque appel.
+    
+    Args:
+        n: Nombre de tickets
+        method: Méthode de génération
+        seed: Graine aléatoire
+        main_scores: Probabilités précalculées pour les numéros principaux {1:0.12, 2:0.08, ...}
+        star_scores: Probabilités précalculées pour les étoiles {1:0.15, 2:0.09, ...}
+    
+    Returns:
+        Liste de tickets {main: [1,2,3,4,5], stars: [1,2]}
+    """
+    import numpy as np
+    
+    np.random.seed(seed)
+    tickets = []
+    
+    # Convertir dictionnaires en listes triées - FIXED: extraire seulement les probabilités
+    main_nums = list(range(1, 51))
+    star_nums = list(range(1, 13))
+    # main_scores et star_scores contiennent des tuples (num, prob) - extraire seulement prob
+    main_probs = np.array([main_scores[i][1] if isinstance(main_scores[i], tuple) else main_scores[i] for i in main_nums])
+    star_probs = np.array([star_scores[i][1] if isinstance(star_scores[i], tuple) else star_scores[i] for i in star_nums])
+    
+    for i in range(n):
+        if method == "topk":
+            # Top-K déterministe - FIXED v4
+            top_main_idx = np.argsort(main_probs)[-5:]
+            top_star_idx = np.argsort(star_probs)[-2:]
+            # Opération vectorielle numpy puis conversion en liste
+            main = sorted((top_main_idx + 1).tolist())
+            stars = sorted((top_star_idx + 1).tolist())
+        
+        elif method == "random":
+            # Aléatoire pondéré par probabilités
+            main_probs_norm = main_probs / main_probs.sum()
+            star_probs_norm = star_probs / star_probs.sum()
+            main = sorted(np.random.choice(main_nums, size=5, replace=False, p=main_probs_norm).tolist())
+            stars = sorted(np.random.choice(star_nums, size=2, replace=False, p=star_probs_norm).tolist())
+        
+        elif method == "hybrid":
+            # Hybride : 60% topk + 40% random - FIXED v4
+            top_main_idx = np.argsort(main_probs)[-10:]  # Top 10 numéros (numpy array)
+            top_star_idx = np.argsort(star_probs)[-5:]   # Top 5 étoiles (numpy array)
+            
+            # Extraire les probabilités correspondantes (encore numpy)
+            top_main_probs = main_probs[top_main_idx]
+            top_star_probs = star_probs[top_star_idx]
+            
+            # Normaliser les probabilités
+            top_main_probs_norm = (top_main_probs / top_main_probs.sum()).flatten()
+            top_star_probs_norm = (top_star_probs / top_star_probs.sum()).flatten()
+            
+            # Convertir indices en numéros pour np.random.choice (force 1D)
+            top_main_nums = (top_main_idx + 1).flatten()
+            top_star_nums = (top_star_idx + 1).flatten()
+            
+            main = sorted(np.random.choice(top_main_nums, size=5, replace=False, p=top_main_probs_norm).tolist())
+            stars = sorted(np.random.choice(top_star_nums, size=2, replace=False, p=top_star_probs_norm).tolist())
+        
+        elif method in ["ensemble", "advanced_hybrid"]:
+            # Pour ensemble/advanced_hybrid - FIXED v4
+            top_main_idx = np.argsort(main_probs)[-10:]
+            top_star_idx = np.argsort(star_probs)[-5:]
+            
+            top_main_probs = main_probs[top_main_idx]
+            top_star_probs = star_probs[top_star_idx]
+            top_main_probs_norm = (top_main_probs / top_main_probs.sum()).flatten()
+            top_star_probs_norm = (top_star_probs / top_star_probs.sum()).flatten()
+            
+            # Convertir indices en numéros (force 1D)
+            top_main_nums = (top_main_idx + 1).flatten()
+            top_star_nums = (top_star_idx + 1).flatten()
+            
+            main = sorted(np.random.choice(top_main_nums, size=5, replace=False, p=top_main_probs_norm).tolist())
+            stars = sorted(np.random.choice(top_star_nums, size=2, replace=False, p=top_star_probs_norm).tolist())
+        
+        else:
+            # Fallback : random simple
+            main = sorted(np.random.choice(main_nums, size=5, replace=False).tolist())
+            stars = sorted(np.random.choice(star_nums, size=2, replace=False).tolist())
+        
+        tickets.append({
+            'main': main,
+            'stars': stars
+        })
+        
+        # Variation de la graine pour chaque ticket
+        np.random.seed(seed + i + 1)
+    
+    return tickets
+
+
+def run_backtesting(seeds: List[int], methods: List[str], n_draws: int, n_tickets: int) -> pd.DataFrame:
+    """
+    Lance le backtesting OPTIMISÉ pour trouver les meilleures configurations.
+    Précalcule les probabilités ML UNE SEULE FOIS au début pour accélérer drastiquement.
+    
+    Args:
+        seeds: Liste des graines à tester
+        methods: Liste des méthodes à tester
+        n_draws: Nombre de tirages récents à utiliser
+        n_tickets: Nombre de tickets par tirage
+        
+    Returns:
+        DataFrame avec les résultats
+    """
+    from repository import get_repository
+    import train_models
+    import time
+    
+    repo = get_repository()
+    all_draws = repo.all_draws_df()
+    test_draws = all_draws.tail(n_draws)
+    
+    # ====== PRÉPARATION DES DONNÉES ======
+    # Convertir les colonnes n1-n5, s1-s2 en listes 'main' et 'stars'
+    test_draws = test_draws.copy()
+    test_draws['main'] = test_draws.apply(lambda row: [row['n1'], row['n2'], row['n3'], row['n4'], row['n5']], axis=1)
+    test_draws['stars'] = test_draws.apply(lambda row: [row['s1'], row['s2']], axis=1)
+    
+    # Vérification des données
+    if len(test_draws) == 0:
+        st.error("❌ Aucun tirage trouvé dans la base de données !")
+        return pd.DataFrame()
+    
+    st.info(f"📊 {len(test_draws)} tirages historiques chargés pour le backtesting")
+    
+    # Afficher un exemple de tirage pour vérification
+    first_draw = test_draws.iloc[0]
+    st.text(f"Exemple: {first_draw['main']} + {first_draw['stars']}")
+    
+    # ====== OPTIMISATION MAJEURE ======
+    # Précalculer les probabilités ML UNE SEULE FOIS (au lieu de les recalculer des milliers de fois)
+    status_precalc = st.empty()
+    status_precalc.text("⚡ Optimisation : Précalcul des probabilités ML (une seule fois)...")
+    
+    try:
+        # Charger les modèles une fois en cache
+        main_proba = train_models.score_balls()
+        star_proba = train_models.score_stars()
+        
+        # Créer un dictionnaire de probabilités précalculées
+        main_scores = {i: main_proba[i-1] for i in range(1, 51)}
+        star_scores = {i: star_proba[i-1] for i in range(1, 13)}
+        
+        status_precalc.text("✅ Probabilités ML précalculées et mises en cache")
+        time.sleep(0.5)
+        status_precalc.empty()
+    except Exception as e:
+        status_precalc.text(f"⚠️ Impossible de précalculer les probas, fallback au mode classique")
+        main_scores = None
+        star_scores = None
+    
+    results = []
+    total_tests = len(seeds) * len(methods)
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    current_test = 0
+    
+    for seed in seeds:
+        for method in methods:
+            current_test += 1
+            progress_bar.progress(current_test / total_tests)
+            status_text.text(f"⚡ Test {current_test}/{total_tests}: seed={seed}, method={method}")
+            
+            total_main_matches = 0
+            total_star_matches = 0
+            total_score = 0
+            best_result = {'main': 0, 'stars': 0}
+            jackpot_count = 0
+            rank2_count = 0
+            rank3_count = 0
+            any_win_count = 0
+            
+            for idx, actual_draw in test_draws.iterrows():
+                try:
+                    # ====== GÉNÉRATION OPTIMISÉE ======
+                    # Utiliser les probabilités précalculées au lieu de recharger les modèles
+                    if main_scores and star_scores:
+                        tickets = _generate_tickets_fast(n_tickets, method, seed, main_scores, star_scores)
+                    else:
+                        # Fallback si précalcul impossible
+                        tickets = suggest_tickets_ui(
+                            n=n_tickets,
+                            method=method,
+                            seed=seed,
+                            use_ensemble=(method == "ensemble")
+                        )
+                    
+                    # CORRECTIF: Extraire les numéros du DataFrame (colonnes n1-n5, s1-s2)
+                    actual_main = [actual_draw['n1'], actual_draw['n2'], actual_draw['n3'], 
+                                   actual_draw['n4'], actual_draw['n5']]
+                    actual_stars = [actual_draw['s1'], actual_draw['s2']]
+                    
+                    # Évaluer chaque ticket
+                    for ticket in tickets:
+                        main_matches = len(set(ticket['main']) & set(actual_main))
+                        star_matches = len(set(ticket['stars']) & set(actual_stars))
+                        
+                        total_main_matches += main_matches
+                        total_star_matches += star_matches
+                        score = main_matches * 10 + star_matches * 5
+                        total_score += score
+                        
+                        # Meilleur résultat
+                        if (main_matches > best_result['main'] or 
+                            (main_matches == best_result['main'] and star_matches > best_result['stars'])):
+                            best_result = {'main': main_matches, 'stars': star_matches}
+                        
+                        # Compter les gains
+                        if main_matches == 5 and star_matches == 2:
+                            jackpot_count += 1
+                        elif main_matches == 5 and star_matches == 1:
+                            rank2_count += 1
+                        elif main_matches == 5 and star_matches == 0:
+                            rank3_count += 1
+                        
+                        if main_matches >= 2 or star_matches >= 1:
+                            any_win_count += 1
+                            
+                except Exception as e:
+                    # AMÉLIORATION: Logger les erreurs au lieu de les ignorer silencieusement
+                    import traceback
+                    error_msg = f"❌ Erreur seed={seed}, method={method}, draw={idx}: {str(e)}"
+                    st.warning(error_msg)
+                    print(f"\n{error_msg}")
+                    print(traceback.format_exc())
+                    continue
+            
+            n_total_tickets = n_draws * n_tickets
+            
+            results.append({
+                'seed': seed,
+                'method': method,
+                'avg_score': total_score / n_total_tickets if n_total_tickets > 0 else 0,
+                'avg_main': total_main_matches / n_total_tickets if n_total_tickets > 0 else 0,
+                'avg_stars': total_star_matches / n_total_tickets if n_total_tickets > 0 else 0,
+                'best_main': best_result['main'],
+                'best_stars': best_result['stars'],
+                'jackpots': jackpot_count,
+                'rank2': rank2_count,
+                'rank3': rank3_count,
+                'any_win': any_win_count,
+                'win_rate': (any_win_count / n_total_tickets * 100) if n_total_tickets > 0 else 0
+            })
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    df_results = pd.DataFrame(results)
+    df_results = df_results.sort_values('avg_score', ascending=False)
+    
+    return df_results
+
 
 def main():
     """Main Streamlit application."""
@@ -397,6 +661,188 @@ def main():
                     
             except Exception as e:
                 st.error(f"❌ Erreur lors du calcul des probabilités: {e}")
+    
+    st.markdown("---")
+    
+    # Section 3.5: Backtesting - Optimisation des paramètres
+    st.header("🔬 Backtesting - Optimisation des paramètres")
+    
+    with st.expander("ℹ️ Qu'est-ce que le backtesting?", expanded=False):
+        st.markdown("""
+        **Le backtesting permet de tester différentes configurations** (graines + méthodes) 
+        sur les tirages passés pour identifier lesquelles auraient donné les meilleurs résultats.
+        
+        **Pourquoi c'est utile:**
+        - 🎯 Trouve la **meilleure graine** automatiquement
+        - 📊 Compare objectivement les **différentes méthodes**
+        - 🔍 Analyse les performances sur les **tirages réels**
+        - 💡 Vous dit **exactement quels paramètres** utiliser
+        
+        **Note:** Les performances passées ne garantissent pas les résultats futurs, 
+        mais permettent d'optimiser vos choix de manière scientifique.
+        """)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("🎲 Graines à tester")
+        seed_option = st.radio(
+            "Plage de graines",
+            options=["Rapide (10 graines)", "Standard (25 graines)", "Complet (50 graines)", "Personnalisé"],
+            index=1
+        )
+        
+        if seed_option == "Rapide (10 graines)":
+            seeds_to_test = [1, 10, 20, 30, 40, 42, 50, 75, 100, 150]
+        elif seed_option == "Standard (25 graines)":
+            seeds_to_test = list(range(1, 26))
+        elif seed_option == "Complet (50 graines)":
+            seeds_to_test = list(range(1, 51))
+        else:  # Personnalisé
+            seed_start = st.number_input("Graine de début", min_value=1, max_value=9999, value=1)
+            seed_end = st.number_input("Graine de fin", min_value=1, max_value=9999, value=50)
+            seeds_to_test = list(range(seed_start, seed_end + 1))
+        
+        st.caption(f"📊 {len(seeds_to_test)} graines à tester")
+    
+    with col2:
+        st.subheader("🎯 Méthodes à tester")
+        methods_to_test = st.multiselect(
+            "Sélectionnez les méthodes",
+            options=["topk", "random", "hybrid", "ensemble", "advanced_hybrid"],
+            default=["topk", "random", "hybrid"]
+        )
+        
+        if not methods_to_test:
+            st.warning("⚠️ Sélectionnez au moins une méthode")
+    
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        n_draws_backtest = st.slider(
+            "Nombre de tirages à analyser",
+            min_value=10,
+            max_value=100,
+            value=30,
+            help="Plus = plus précis mais plus lent"
+        )
+    
+    with col4:
+        n_tickets_backtest = st.slider(
+            "Tickets par tirage",
+            min_value=5,
+            max_value=20,
+            value=10,
+            help="Nombre de tickets générés pour chaque test"
+        )
+    
+    # Estimation du temps
+    total_tests = len(seeds_to_test) * len(methods_to_test)
+    estimated_time = total_tests * 0.5  # ~0.5 sec par test
+    
+    st.info(f"⏱️ Tests à effectuer: **{total_tests}** | Durée estimée: **~{estimated_time/60:.1f} minutes**")
+    
+    if st.button("🚀 Lancer le backtesting", use_container_width=True, type="primary"):
+        if not methods_to_test:
+            st.error("❌ Veuillez sélectionner au moins une méthode")
+        else:
+            with st.spinner(f"Backtesting en cours... ({total_tests} tests)"):
+                try:
+                    df_results = run_backtesting(
+                        seeds=seeds_to_test,
+                        methods=methods_to_test,
+                        n_draws=n_draws_backtest,
+                        n_tickets=n_tickets_backtest
+                    )
+                    
+                    if not df_results.empty:
+                        st.success("✅ Backtesting terminé!")
+                        
+                        # Afficher le TOP 10
+                        st.subheader("🏆 TOP 10 Meilleures Configurations")
+                        
+                        top_10 = df_results.head(10).copy()
+                        top_10['rank'] = range(1, len(top_10) + 1)
+                        
+                        # Formater pour l'affichage
+                        display_df = top_10[[
+                            'rank', 'seed', 'method', 'avg_score', 'avg_main', 
+                            'avg_stars', 'best_main', 'best_stars', 'win_rate'
+                        ]].copy()
+                        
+                        display_df.columns = [
+                            'Rang', 'Graine', 'Méthode', 'Score Moy', 'Nums Moy', 
+                            'Étoiles Moy', 'Meilleur Nums', 'Meilleur Étoiles', 'Taux Gain %'
+                        ]
+                        
+                        # Arrondir les valeurs
+                        display_df['Score Moy'] = display_df['Score Moy'].round(2)
+                        display_df['Nums Moy'] = display_df['Nums Moy'].round(2)
+                        display_df['Étoiles Moy'] = display_df['Étoiles Moy'].round(2)
+                        display_df['Taux Gain %'] = display_df['Taux Gain %'].round(1)
+                        
+                        st.dataframe(
+                            display_df,
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                        
+                        # Recommandation
+                        best_config = df_results.iloc[0]
+                        st.success(f"""
+                        💡 **RECOMMANDATION:**
+                        
+                        Utilisez **seed={int(best_config['seed'])}** avec la méthode **{best_config['method']}**
+                        
+                        Cette configuration a obtenu:
+                        - Score moyen: **{best_config['avg_score']:.2f}**
+                        - Numéros corrects (moy): **{best_config['avg_main']:.2f}/5**
+                        - Étoiles correctes (moy): **{best_config['avg_stars']:.2f}/2**
+                        - Meilleur résultat: **{int(best_config['best_main'])} numéros + {int(best_config['best_stars'])} étoiles**
+                        - Taux de gain: **{best_config['win_rate']:.1f}%**
+                        """)
+                        
+                        # Graphique de comparaison des méthodes
+                        st.subheader("📊 Comparaison des méthodes")
+                        
+                        method_comparison = df_results.groupby('method').agg({
+                            'avg_score': 'mean',
+                            'avg_main': 'mean',
+                            'avg_stars': 'mean',
+                            'win_rate': 'mean'
+                        }).round(2)
+                        
+                        st.bar_chart(method_comparison['avg_score'])
+                        
+                        # Export des résultats
+                        st.subheader("💾 Export des résultats")
+                        
+                        csv_data = df_results.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Télécharger les résultats (CSV)",
+                            data=csv_data,
+                            file_name=f"backtest_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+                        
+                        # Détails par graine pour la meilleure méthode
+                        if len(methods_to_test) > 1:
+                            st.subheader("🔍 Détails par graine (meilleure méthode)")
+                            best_method = best_config['method']
+                            method_details = df_results[df_results['method'] == best_method].head(10)
+                            
+                            st.line_chart(
+                                method_details.set_index('seed')['avg_score'],
+                                use_container_width=True
+                            )
+                    else:
+                        st.warning("⚠️ Aucun résultat obtenu")
+                        
+                except Exception as e:
+                    st.error(f"❌ Erreur lors du backtesting: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
     
     st.markdown("---")
     
