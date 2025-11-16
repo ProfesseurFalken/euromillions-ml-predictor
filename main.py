@@ -104,7 +104,8 @@ def main():
             str(app_dir / "ui" / "streamlit_app.py"),
             "--server.port", "8501",
             "--server.address", "localhost",
-            "--browser.gatherUsageStats", "false"
+            "--browser.gatherUsageStats", "false",
+            "--server.headless", "true"
         ]
         
         # Replace sys.argv to pass arguments to Streamlit

@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EuroMillions - Visualisations</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        h1 {
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        .subtitle {
+            text-align: center;
+            font-size: 1.2em;
+            margin-bottom: 30px;
+            opacity: 0.9;
+        }
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 30px;
+        }
+        .card {
+            background: white;
+            color: #333;
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            transition: transform 0.3s, box-shadow 0.3s;
+            cursor: pointer;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.4);
+        }
+        .card h2 {
+            color: #667eea;
+            margin-top: 0;
+            font-size: 1.5em;
+        }
+        .card p {
+            color: #666;
+            line-height: 1.6;
+        }
+        .btn {
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 25px;
+            text-decoration: none;
+            transition: transform 0.2s;
+            margin-top: 10px;
+        }
+        .btn:hover {
+            transform: scale(1.05);
+        }
+        .stats {
+            background: rgba(255,255,255,0.1);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            backdrop-filter: blur(10px);
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        .stat-item {
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            display: block;
+        }
+        .stat-label {
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+    </style>
+</head>
+<body>
+    <h1>🎰 EuroMillions - Analyse Avancée</h1>
+    <p class="subtitle">Visualisations interactives des corrélations entre tirages et facteurs externes</p>
+    
+    <div class="stats">
+        <div class="stats-grid">
+            <div class="stat-item">
+                <span class="stat-value">100</span>
+                <span class="stat-label">Tirages analysés</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-value">22</span>
+                <span class="stat-label">Variables collectées</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-value">1</span>
+                <span class="stat-label">Corrélations trouvées</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-value">7</span>
+                <span class="stat-label">Visualisations</span>
+            </div>
+        </div>
+    </div>
+    
+    <div class="card-grid">
+
+        <div class="card" onclick="window.location.href='overview_dashboard.html'">
+            <h2>📊 Dashboard récapitulatif</h2>
+            <p>Vue d'ensemble des données astronomiques et météorologiques collectées pour chaque tirage.</p>
+            <a href="overview_dashboard.html" class="btn">Voir la visualisation →</a>
+        </div>
+
+        <div class="card" onclick="window.location.href='moon_stars_correlation.html'">
+            <h2>🌙⭐ Corrélation Lune-Étoiles</h2>
+            <p>Analyse de la corrélation (faible) entre la phase lunaire et la somme des étoiles tirées.</p>
+            <a href="moon_stars_correlation.html" class="btn">Voir la visualisation →</a>
+        </div>
+
+        <div class="card" onclick="window.location.href='weather_heatmap.html'">
+            <h2>🌡️💧 Heatmap Météo</h2>
+            <p>Distribution des conditions météorologiques (température vs humidité) lors des tirages.</p>
+            <a href="weather_heatmap.html" class="btn">Voir la visualisation →</a>
+        </div>
+
+        <div class="card" onclick="window.location.href='moon_polar.html'">
+            <h2>🌗 Phases lunaires (polaire)</h2>
+            <p>Représentation polaire des tirages en fonction du cycle lunaire complet.</p>
+            <a href="moon_polar.html" class="btn">Voir la visualisation →</a>
+        </div>
+
+        <div class="card" onclick="window.location.href='prime_fibonacci.html'">
+            <h2>🔢 Nombres premiers & Fibonacci</h2>
+            <p>Fréquence des nombres premiers et de Fibonacci dans les tirages.</p>
+            <a href="prime_fibonacci.html" class="btn">Voir la visualisation →</a>
+        </div>
+
+        <div class="card" onclick="window.location.href='temporal_evolution.html'">
+            <h2>📈 Évolution temporelle</h2>
+            <p>Évolution dans le temps des caractéristiques des tirages avec moyennes mobiles.</p>
+            <a href="temporal_evolution.html" class="btn">Voir la visualisation →</a>
+        </div>
+
+        <div class="card" onclick="window.location.href='correlation_matrix.html'">
+            <h2>🔗 Matrice de corrélation</h2>
+            <p>Matrice complète des corrélations entre toutes les variables analysées.</p>
+            <a href="correlation_matrix.html" class="btn">Voir la visualisation →</a>
+        </div>
+
+    </div>
+    
+    <div style="text-align: center; margin-top: 50px; padding: 20px; background: rgba(255,255,255,0.1); border-radius: 10px;">
+        <h3>🎓 Note scientifique</h3>
+        <p style="max-width: 800px; margin: 0 auto; line-height: 1.8;">
+            Ces visualisations confirment que les tirages EuroMillions sont <strong>vraiment aléatoires</strong>.
+            L'absence de corrélations fortes entre les tirages et les facteurs externes (lune, météo, etc.)
+            prouve la robustesse du système de tirage. La faible corrélation trouvée (phase lunaire ↔ étoiles)
+            est statistiquement attendue par pur hasard avec 40 tests à p&lt;0.05.
+        </p>
+    </div>
+</body>
+</html>

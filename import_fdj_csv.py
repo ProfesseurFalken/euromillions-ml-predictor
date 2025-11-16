@@ -95,11 +95,12 @@ def import_fdj_files():
     print("🏛️ Import des données officielles FDJ")
     print("=" * 45)
     
-    # Chemins des fichiers
+    # Chemins des fichiers (utiliser les fichiers CSV locaux)
     csv_files = [
-        r"c:\Users\460nie\Downloads\euromillions\euromillions.csv",
-        r"c:\Users\460nie\Downloads\euromillions_2\euromillions_2.csv", 
-        r"c:\Users\460nie\Downloads\euromillions_3\euromillions_3.csv"
+        "euromillions.csv",
+        "euromillions_2.csv", 
+        "euromillions_3.csv",
+        "euromillions_4.csv"  # Ajouter le quatrième fichier disponible
     ]
     
     all_draws = []

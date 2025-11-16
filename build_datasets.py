@@ -5,6 +5,7 @@ Creates features based on historical patterns and frequencies.
 import pandas as pd
 import numpy as np
 from typing import Tuple, Dict, Any
+from datetime import datetime, timedelta
 from loguru import logger
 
 
@@ -391,3 +392,262 @@ def build_enhanced_datasets(df: pd.DataFrame, window_size: int = 100) -> Tuple[n
     }
     
     return X_main_flat, y_main, X_star_flat, y_star, meta
+
+
+def build_enhanced_datasets_v2(df: pd.DataFrame, window_size: int = 100) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    """
+    Build enhanced datasets with advanced temporal features.
+    
+    Args:
+        df: DataFrame from repository.all_draws_df()
+        window_size: Rolling window size for frequency calculations
+    
+    Returns:
+        Enhanced datasets with temporal features
+    """
+    logger.info(f"Building enhanced datasets v2 with temporal features (window: {window_size})")
+    
+    # Start with base enhanced features
+    X_main, y_main, X_star, y_star, meta = build_enhanced_datasets(df, window_size)
+    
+    # Add temporal features
+    df_enhanced = add_temporal_features(df.copy())
+    temporal_features = extract_temporal_feature_matrix(df_enhanced)
+    
+    # Add sequence pattern features
+    pattern_features = add_sequence_pattern_features(df)
+    
+    # Add gap analysis features
+    gap_features = add_gap_analysis_features(df, window_size)
+    
+    # Add correlation features
+    correlation_features = add_correlation_features(df, window_size)
+    
+    # Combine all features
+    n_samples = X_main.shape[0]
+    
+    # Ensure all feature matrices have the same number of samples
+    temporal_features = temporal_features[-n_samples:] if len(temporal_features) > n_samples else temporal_features
+    pattern_features = pattern_features[-n_samples:] if len(pattern_features) > n_samples else pattern_features
+    gap_features = gap_features[-n_samples:] if len(gap_features) > n_samples else gap_features
+    correlation_features = correlation_features[-n_samples:] if len(correlation_features) > n_samples else correlation_features
+    
+    # Concatenate features
+    X_main_enhanced = np.concatenate([
+        X_main, 
+        temporal_features,
+        pattern_features, 
+        gap_features,
+        correlation_features
+    ], axis=1)
+    
+    # Star features get the same temporal enhancements (scaled)
+    X_star_enhanced = np.concatenate([
+        X_star,
+        temporal_features,
+        pattern_features[:, :12] if pattern_features.shape[1] >= 12 else pattern_features,  # Adapt for stars
+        gap_features[:, :12] if gap_features.shape[1] >= 12 else gap_features,
+        correlation_features[:, :12] if correlation_features.shape[1] >= 12 else correlation_features
+    ], axis=1)
+    
+    # Update metadata
+    meta["features"].extend([
+        "temporal_features", "pattern_features", "gap_features", "correlation_features"
+    ])
+    meta["enhanced_v2"] = True
+    meta["total_main_features"] = X_main_enhanced.shape[1]
+    meta["total_star_features"] = X_star_enhanced.shape[1]
+    
+    logger.info(f"Enhanced v2 features: {X_main_enhanced.shape[1]} main, {X_star_enhanced.shape[1]} star")
+    
+    return X_main_enhanced, y_main, X_star_enhanced, y_star, meta
+
+
+def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Ajouter des features temporelles cycliques."""
+    
+    df['draw_date'] = pd.to_datetime(df['draw_date'])
+    
+    # Features cycliques de base
+    df['day_of_week'] = df['draw_date'].dt.dayofweek
+    df['month'] = df['draw_date'].dt.month
+    df['quarter'] = df['draw_date'].dt.quarter
+    df['day_of_year'] = df['draw_date'].dt.dayofyear
+    df['week_of_year'] = df['draw_date'].dt.isocalendar().week
+    
+    # Features cycliques sinusoïdales pour capturer la périodicité
+    df['day_sin'] = np.sin(2 * np.pi * df['day_of_week'] / 7)
+    df['day_cos'] = np.cos(2 * np.pi * df['day_of_week'] / 7)
+    df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
+    df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
+    df['year_progress'] = df['day_of_year'] / 365.25
+    df['year_sin'] = np.sin(2 * np.pi * df['year_progress'])
+    df['year_cos'] = np.cos(2 * np.pi * df['year_progress'])
+    
+    # Features spéciales
+    df['is_weekend'] = (df['day_of_week'] >= 5).astype(int)
+    df['is_summer'] = df['month'].isin([6, 7, 8]).astype(int)
+    df['is_winter'] = df['month'].isin([12, 1, 2]).astype(int)
+    df['is_end_of_month'] = (df['draw_date'].dt.day >= 25).astype(int)
+    df['is_beginning_of_year'] = ((df['month'] == 1) & (df['draw_date'].dt.day <= 15)).astype(int)
+    
+    return df
+
+
+def extract_temporal_feature_matrix(df: pd.DataFrame) -> np.ndarray:
+    """Extraire la matrice des features temporelles."""
+    
+    temporal_cols = [
+        'day_of_week', 'month', 'quarter', 'day_of_year', 'week_of_year',
+        'day_sin', 'day_cos', 'month_sin', 'month_cos', 'year_sin', 'year_cos',
+        'is_weekend', 'is_summer', 'is_winter', 'is_end_of_month', 'is_beginning_of_year'
+    ]
+    
+    # Assurer que toutes les colonnes existent
+    available_cols = [col for col in temporal_cols if col in df.columns]
+    
+    if available_cols:
+        return df[available_cols].values
+    else:
+        # Fallback: créer des features minimales
+        n_rows = len(df)
+        return np.zeros((n_rows, len(temporal_cols)))
+
+
+def add_sequence_pattern_features(df: pd.DataFrame) -> np.ndarray:
+    """Analyser les patterns de séquences dans les tirages."""
+    
+    features_list = []
+    
+    for i, row in df.iterrows():
+        balls = sorted([row['n1'], row['n2'], row['n3'], row['n4'], row['n5']])
+        stars = sorted([row['s1'], row['s2']])
+        
+        # Features pour les boules principales
+        consecutive_pairs = sum(1 for j in range(len(balls)-1) if balls[j+1] - balls[j] == 1)
+        ball_range = max(balls) - min(balls)
+        ball_sum = sum(balls)
+        ball_mean = np.mean(balls)
+        ball_std = np.std(balls)
+        
+        # Gaps entre boules
+        gaps = [balls[j+1] - balls[j] for j in range(len(balls)-1)]
+        avg_gap = np.mean(gaps)
+        std_gap = np.std(gaps)
+        max_gap = max(gaps)
+        min_gap = min(gaps)
+        
+        # Features pour les étoiles
+        star_range = max(stars) - min(stars)
+        star_sum = sum(stars)
+        star_gap = stars[1] - stars[0]
+        
+        # Patterns de distribution
+        low_balls = sum(1 for b in balls if b <= 17)  # Boules basses (1-17)
+        mid_balls = sum(1 for b in balls if 18 <= b <= 34)  # Boules moyennes (18-34)
+        high_balls = sum(1 for b in balls if b >= 35)  # Boules hautes (35-50)
+        
+        # Parité
+        even_balls = sum(1 for b in balls if b % 2 == 0)
+        odd_balls = 5 - even_balls
+        even_stars = sum(1 for s in stars if s % 2 == 0)
+        
+        features = [
+            consecutive_pairs, ball_range, ball_sum, ball_mean, ball_std,
+            avg_gap, std_gap, max_gap, min_gap,
+            star_range, star_sum, star_gap,
+            low_balls, mid_balls, high_balls,
+            even_balls, odd_balls, even_stars
+        ]
+        
+        features_list.append(features)
+    
+    return np.array(features_list)
+
+
+def add_gap_analysis_features(df: pd.DataFrame, window_size: int) -> np.ndarray:
+    """Analyser les patterns d'intervalles entre apparitions."""
+    
+    n_rows = len(df)
+    n_features = 62  # 50 boules + 12 étoiles
+    gap_features = np.zeros((n_rows, n_features))
+    
+    # Pour chaque tirage, calculer les gaps depuis la dernière apparition
+    for i in range(n_rows):
+        current_row = df.iloc[i]
+        current_balls = [current_row['n1'], current_row['n2'], current_row['n3'], current_row['n4'], current_row['n5']]
+        current_stars = [current_row['s1'], current_row['s2']]
+        
+        # Analyser les gaps pour les boules principales
+        for ball_num in range(1, 51):
+            gap_since_last = 0
+            
+            # Chercher vers le passé
+            for j in range(i - 1, max(0, i - window_size), -1):
+                past_row = df.iloc[j]
+                past_balls = [past_row['n1'], past_row['n2'], past_row['n3'], past_row['n4'], past_row['n5']]
+                
+                if ball_num in past_balls:
+                    break
+                gap_since_last += 1
+            
+            gap_features[i, ball_num - 1] = min(gap_since_last, window_size)  # Cap au window_size
+        
+        # Analyser les gaps pour les étoiles
+        for star_num in range(1, 13):
+            gap_since_last = 0
+            
+            for j in range(i - 1, max(0, i - window_size), -1):
+                past_row = df.iloc[j]
+                past_stars = [past_row['s1'], past_row['s2']]
+                
+                if star_num in past_stars:
+                    break
+                gap_since_last += 1
+            
+            gap_features[i, 49 + star_num] = min(gap_since_last, window_size)
+    
+    return gap_features
+
+
+def add_correlation_features(df: pd.DataFrame, window_size: int) -> np.ndarray:
+    """Ajouter des features basées sur les corrélations entre boules."""
+    
+    n_rows = len(df)
+    correlation_features = np.zeros((n_rows, 20))  # 20 features de corrélation
+    
+    for i in range(window_size, n_rows):  # Commencer après la fenêtre initiale
+        # Analyser la fenêtre précédente
+        window_data = df.iloc[i - window_size:i]
+        
+        # Matrice de co-occurrence pour cette fenêtre
+        cooccurrence = np.zeros((50, 50))
+        
+        for _, row in window_data.iterrows():
+            balls = [row['n1'], row['n2'], row['n3'], row['n4'], row['n5']]
+            
+            for b1 in balls:
+                for b2 in balls:
+                    if b1 != b2:
+                        cooccurrence[b1-1, b2-1] += 1
+        
+        # Extraire des statistiques de corrélation
+        current_row = df.iloc[i]
+        current_balls = [current_row['n1'], current_row['n2'], current_row['n3'], current_row['n4'], current_row['n5']]
+        
+        # Features basées sur les corrélations des boules actuelles
+        correlation_stats = []
+        
+        for ball in current_balls:
+            ball_correlations = cooccurrence[ball-1, :]
+            correlation_stats.extend([
+                np.mean(ball_correlations),
+                np.max(ball_correlations),
+                np.std(ball_correlations),
+                np.sum(ball_correlations > 0)  # Nombre de boules corrélées
+            ])
+        
+        # Prendre les 20 premières statistiques
+        correlation_features[i, :] = np.array(correlation_stats[:20])
+    
+    return correlation_features

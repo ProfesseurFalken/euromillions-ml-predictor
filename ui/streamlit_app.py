@@ -22,6 +22,7 @@ from streamlit_adapters import (
     init_full_history,
     update_incremental,
     train_from_scratch,
+    train_ensemble_models,
     reload_models,
     get_scores,
     suggest_tickets_ui,
@@ -78,7 +79,7 @@ def save_env_settings(settings):
         f.write('\n'.join(env_content))
 
 def format_tickets_display(tickets):
-    """Format tickets for display."""
+    """Format enhanced tickets for display with confidence scores."""
     if not tickets:
         return "Aucun ticket généré"
     
@@ -86,11 +87,34 @@ def format_tickets_display(tickets):
     for ticket in tickets:
         balls_str = ticket['balls_str']
         stars_str = ticket['stars_str']
-        # Format avec séparation visuelle claire et numéros à la ligne
-        ticket_display = f"🎫 **Ticket {ticket['ticket_id']}**\n\n   {balls_str}\n   ⭐ {stars_str}"
+        
+        # Get confidence info
+        confidence = ticket.get('confidence', 50.0)
+        confidence_level = ticket.get('confidence_level', 'Moyenne')
+        method = ticket.get('method', 'unknown')
+        
+        # Choose confidence emoji
+        if confidence >= 80:
+            confidence_emoji = "🔥"
+        elif confidence >= 65:
+            confidence_emoji = "⚡"
+        elif confidence >= 50:
+            confidence_emoji = "✨"
+        else:
+            confidence_emoji = "💫"
+        
+        # Format with confidence and method info
+        ticket_display = f"""🎫 **Ticket {ticket['ticket_id']}** {confidence_emoji}
+
+   {balls_str}
+   ⭐ {stars_str}
+   
+   📊 **Confiance:** {confidence}% ({confidence_level})
+   🎯 **Méthode:** {method}"""
+        
         display_lines.append(ticket_display)
     
-    return '\n\n'.join(display_lines)
+    return '\n\n---\n\n'.join(display_lines)
 
 def main():
     """Main Streamlit application."""
@@ -114,10 +138,46 @@ def main():
         
         method = st.selectbox(
             "Méthode de génération",
-            options=["hybrid", "topk", "random"],
+            options=["hybrid", "ensemble", "advanced_hybrid", "topk", "random"],
             index=0,
             help="Stratégie de sélection des numéros"
         )
+        
+        # Advanced options
+        st.subheader("🔧 Options avancées")
+        
+        use_ensemble = st.checkbox(
+            "Utiliser les modèles d'ensemble",
+            value=True,
+            help="Combine plusieurs algorithmes ML pour de meilleures prédictions"
+        )
+        
+        # Hybrid strategy weights (only for advanced_hybrid)
+        if method == "advanced_hybrid":
+            st.subheader("⚖️ Poids de la stratégie hybride")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                ml_weight = st.slider("ML", 0.0, 1.0, 0.4, 0.1, help="Poids des prédictions ML")
+                freq_weight = st.slider("Fréquence", 0.0, 1.0, 0.3, 0.1, help="Poids de l'analyse de fréquence")
+            
+            with col2:
+                pattern_weight = st.slider("Motifs", 0.0, 1.0, 0.2, 0.1, help="Poids de l'analyse des motifs")
+                gap_weight = st.slider("Écarts", 0.0, 1.0, 0.1, 0.1, help="Poids de l'analyse des écarts")
+            
+            # Normalize weights
+            total_weight = ml_weight + freq_weight + pattern_weight + gap_weight
+            if total_weight > 0:
+                hybrid_weights = {
+                    "ml_weight": ml_weight / total_weight,
+                    "freq_weight": freq_weight / total_weight,
+                    "pattern_weight": pattern_weight / total_weight,
+                    "gap_weight": gap_weight / total_weight
+                }
+            else:
+                hybrid_weights = None
+        else:
+            hybrid_weights = None
         
         seed = st.number_input(
             "Graine aléatoire",
@@ -222,7 +282,7 @@ def main():
     # Section 2: Training
     st.header("🧠 Entraînement")
     
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         if st.button("🏋️ Entraîner (from scratch)", use_container_width=True):
@@ -251,6 +311,33 @@ def main():
                     st.error(f"❌ Erreur lors de l'entraînement: {e}")
     
     with col2:
+        if st.button("🤖 Ensemble de modèles", use_container_width=True):
+            with st.spinner("Entraînement des modèles d'ensemble..."):
+                try:
+                    result = train_ensemble_models()
+                    
+                    if result.get("success", False):
+                        st.success(f"✅ {result['message']}")
+                        
+                        if result.get("models_trained"):
+                            st.info(f"🎯 Modèles entraînés: {', '.join(result['models_trained'])}")
+                        
+                        if result.get("performance"):
+                            perf = result["performance"]
+                            metrics_col1, metrics_col2 = st.columns(2)
+                            with metrics_col1:
+                                if "ensemble_score" in perf:
+                                    st.metric("Score d'ensemble", f"{perf['ensemble_score']:.4f}")
+                            with metrics_col2:
+                                if "best_model" in perf:
+                                    st.metric("Meilleur modèle", perf["best_model"])
+                    else:
+                        st.warning(f"⚠️ {result['message']}")
+                        
+                except Exception as e:
+                    st.error(f"❌ Erreur lors de l'entraînement d'ensemble: {e}")
+    
+    with col3:
         if st.button("📦 Recharger le modèle", use_container_width=True):
             with st.spinner("Rechargement du modèle..."):
                 try:
@@ -319,7 +406,7 @@ def main():
     if st.button("🎲 Générer les tickets", use_container_width=True):
         with st.spinner(f"Génération de {n_tickets} tickets avec la méthode {method}..."):
             try:
-                tickets = suggest_tickets_ui(n_tickets, method, seed)
+                tickets = suggest_tickets_ui(n_tickets, method, seed, use_ensemble, hybrid_weights)
                 
                 if tickets:
                     st.success(f"✅ {len(tickets)} tickets générés avec succès!")
@@ -377,7 +464,12 @@ def main():
                     method_explanations = {
                         "topk": "Sélectionne les boules/étoiles avec les plus hautes probabilités",
                         "random": "Échantillonnage aléatoire pondéré par les probabilités",
-                        "hybrid": "Mélange de prédictions top et d'échantillonnage aléatoire"
+                        "hybrid": "Mélange de prédictions top et d'échantillonnage aléatoire",
+                        "ensemble": "Combine plusieurs algorithmes ML (LightGBM, XGBoost, CatBoost, RandomForest)",
+                        "advanced_hybrid": "Stratégie hybride avancée (ML + fréquences + motifs + écarts)",
+                        "enhanced_hybrid": "Version améliorée de la méthode hybride avec ensemble",
+                        "enhanced_topk": "Version améliorée du top-k avec ensemble",
+                        "enhanced_random": "Version améliorée de l'aléatoire avec ensemble"
                     }
                     
                     st.caption(method_explanations.get(method, "Méthode personnalisée"))

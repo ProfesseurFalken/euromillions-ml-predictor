@@ -36,13 +36,11 @@ for %%P in (8501 8502 8503 8504) do (
         echo [INFO] Port %%P disponible - Lancement en cours...
         echo [INFO] Interface: http://localhost:%%P
         echo [INFO] Appuyez sur Ctrl+C pour arreter
+        echo [INFO] Le navigateur s'ouvrira automatiquement
         echo.
         
-        REM Ouvrir le navigateur apres 3 secondes
-        start /B powershell -Command "Start-Sleep 3; Start-Process 'http://localhost:%%P'"
-        
-        REM Lancer Streamlit
-        python -m streamlit run ui\streamlit_app.py --server.port %%P --server.headless true
+        REM Lancer Streamlit avec le Python du venv
+        .venv\Scripts\python.exe -m streamlit run ui\streamlit_app.py --server.port %%P
         goto END
     ) else (
         echo [INFO] Port %%P occupe

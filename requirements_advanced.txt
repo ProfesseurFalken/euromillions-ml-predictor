@@ -1,0 +1,19 @@
+# Dépendances supplémentaires pour analyses avancées
+# À ajouter au requirements.txt principal
+
+# Analyse en ondelettes
+PyWavelets==1.4.1
+
+# Analyses scientifiques avancées (déjà présent mais on spécifie la version)
+scipy==1.11.4
+
+# Astronomie (optionnel, pour calculs planétaires précis)
+# ephem==4.1.5
+# skyfield==1.48
+
+# Analyse de séries temporelles
+statsmodels==0.14.1
+
+# Graphiques avancés (pour visualisation future)
+plotly==5.18.0
+seaborn==0.13.0

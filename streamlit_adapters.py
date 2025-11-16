@@ -10,15 +10,45 @@ and return consistent data structures for the web interface.
 import io
 import json
 import pandas as pd
+import numpy as np
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 from loguru import logger
 
+def convert_numpy_types(obj):
+    """Recursively convert numpy types to Python native types for JSON serialization."""
+    if isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    else:
+        return obj
+
 from config import get_settings
 from repository import get_repository, init_database
 from hybrid_scraper import get_best_available_draws, scrape_latest_hybrid
 from train_models import EuromillionsTrainer, train_latest, get_model_info
+# Optional imports for advanced features
+try:
+    from ensemble_models import EnsembleTrainer, predict_with_ensemble
+    ENSEMBLE_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Ensemble models not available: {e}")
+    ENSEMBLE_AVAILABLE = False
+
+try:
+    from hybrid_strategy import HybridPredictionStrategy
+    HYBRID_STRATEGY_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Hybrid strategy not available: {e}")
+    HYBRID_STRATEGY_AVAILABLE = False
 
 
 class StreamlitAdapters:
@@ -324,42 +354,165 @@ class StreamlitAdapters:
             empty_stars = pd.DataFrame(columns=['star', 'probability', 'rank', 'percentage'])
             return empty_balls, empty_stars
     
-    def suggest_tickets_ui(self, n: int = 10, method: str = "hybrid", seed: int = 42) -> List[Dict[str, Any]]:
+    def suggest_tickets_ui(self, n: int = 10, method: str = "hybrid", seed: int = 42, 
+                          use_ensemble: bool = True, hybrid_weights: Optional[Dict[str, float]] = None) -> List[Dict[str, Any]]:
         """
-        Generate lottery ticket suggestions for UI display.
+        Generate enhanced lottery ticket suggestions using multiple strategies.
         
         Args:
             n: Number of tickets to generate
-            method: Generation method ("topk", "random", "hybrid")
+            method: Generation method ("topk", "random", "hybrid", "ensemble", "advanced_hybrid")
             seed: Random seed for reproducibility
+            use_ensemble: Whether to use ensemble models
+            hybrid_weights: Custom weights for hybrid strategy
             
         Returns:
-            list: List of ticket dictionaries with balls, stars, and metadata
+            list: List of enhanced ticket dictionaries with confidence scores
         """
         try:
-            # Ensure models are loaded
-            self.trainer.load_models()
+            logger.info(f"Generating {n} tickets with method '{method}' (ensemble: {use_ensemble})")
             
-            # Generate combinations
-            combinations = self.trainer.suggest_combinations(k=n, method=method, seed=seed)
-            
-            # Convert to UI-friendly format
             tickets = []
             
-            for i, combo in enumerate(combinations, 1):
-                # Extract just the balls and stars arrays (skip other dict keys)
-                balls = [int(x) for x in combo["balls"]]
-                stars = [int(x) for x in combo["stars"]]
+            if method == "ensemble" and use_ensemble and ENSEMBLE_AVAILABLE:
+                # Use pure ensemble prediction
+                tickets = self._generate_ensemble_tickets(n, seed)
+                
+            elif method == "advanced_hybrid" and HYBRID_STRATEGY_AVAILABLE:
+                # Use advanced hybrid strategy
+                tickets = self._generate_advanced_hybrid_tickets(n, seed, hybrid_weights)
+                
+            else:
+                # Enhanced version of existing methods
+                tickets = self._generate_enhanced_tickets(n, method, seed, use_ensemble)
+            
+            # Add metadata and confidence scores
+            for ticket in tickets:
+                # Convert numpy types to native Python types for JSON serialization
+                if "balls" in ticket:
+                    ticket["balls"] = [int(x) for x in ticket["balls"]]
+                if "stars" in ticket:
+                    ticket["stars"] = [int(x) for x in ticket["stars"]]
+                
+                # Convert any numpy floats to Python floats
+                if "combined_score" in ticket:
+                    ticket["combined_score"] = float(ticket["combined_score"])
+                if "base_confidence" in ticket:
+                    ticket["base_confidence"] = float(ticket["base_confidence"])
+                
+                ticket["generated_at"] = datetime.now().isoformat()
+                ticket["model_version"] = "v2_enhanced"
+                
+                # Calculate enhanced confidence score
+                confidence = self._calculate_enhanced_confidence(ticket)
+                ticket["confidence"] = float(confidence)  # Ensure it's a Python float
+                ticket["confidence_level"] = self._get_confidence_level(confidence)
+            
+            # Sort by confidence (highest first)
+            tickets.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+            
+            # Convert all numpy types to Python types for JSON serialization
+            tickets = [convert_numpy_types(ticket) for ticket in tickets]
+            
+            logger.info(f"Generated {len(tickets)} enhanced tickets")
+            return tickets
+            
+        except Exception as e:
+            logger.error(f"Failed to generate enhanced ticket suggestions: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            # Fallback to basic method
+            fallback_tickets = self._generate_fallback_tickets(n, method, seed)
+            if not fallback_tickets:
+                logger.error("Fallback also failed, generating minimal tickets")
+                return self._generate_minimal_tickets(n, seed)
+            return fallback_tickets
+    
+    def _generate_ensemble_tickets(self, n: int, seed: int) -> List[Dict[str, Any]]:
+        """Generate tickets using ensemble models."""
+        
+        try:
+            if not ENSEMBLE_AVAILABLE:
+                logger.warning("Ensemble models not available, using fallback")
+                return []
+                
+            ensemble_trainer = EnsembleTrainer()
+            
+            if not ensemble_trainer.models_exist():
+                logger.warning("Ensemble models not found, using fallback")
+                return []
+            
+            tickets = []
+            np.random.seed(seed)
+            
+            # Get latest data for predictions
+            repo = get_repository()
+            df = repo.all_draws_df()
+            
+            # Build features for prediction (use last row as base)
+            from build_datasets import build_enhanced_datasets
+            X_main, _, X_star, _, _ = build_enhanced_datasets(df, window_size=100)
+            
+            # Use the most recent features
+            latest_main = X_main[-1:] if len(X_main) > 0 else np.zeros((1, 200))
+            latest_star = X_star[-1:] if len(X_star) > 0 else np.zeros((1, 48))
+            
+            for i in range(n):
+                # Get ensemble predictions
+                main_proba, star_proba = ensemble_trainer.predict_with_ensemble(latest_main, latest_star)
+                
+                # Extract probabilities for positive class (shape is (n_outputs, n_samples, n_classes))
+                # We want the probability of class 1 (ball/star appears) for each position
+                if main_proba.ndim == 3:
+                    # Shape: (50, 1, 2) -> extract [:, 0, 1] -> (50,)
+                    main_proba = main_proba[:, 0, 1]
+                elif main_proba.ndim == 2:
+                    # Shape: (50, 2) -> extract [:, 1] -> (50,)
+                    main_proba = main_proba[:, 1]
+                    
+                if star_proba.ndim == 3:
+                    # Shape: (12, 1, 2) -> extract [:, 0, 1] -> (12,)
+                    star_proba = star_proba[:, 0, 1]
+                elif star_proba.ndim == 2:
+                    # Shape: (12, 2) -> extract [:, 1] -> (12,)
+                    star_proba = star_proba[:, 1]
+                
+                # Add some randomness for variety between tickets
+                if i > 0:
+                    noise_factor = 0.05 * i  # Small noise for diversity
+                    main_proba = main_proba + np.random.normal(0, noise_factor, len(main_proba))
+                    star_proba = star_proba + np.random.normal(0, noise_factor, len(star_proba))
+                    
+                    # Ensure probabilities stay positive
+                    main_proba = np.clip(main_proba, 0, 1)
+                    star_proba = np.clip(star_proba, 0, 1)
+                
+                # Select top candidates with some randomness
+                top_balls_idx = np.argsort(main_proba)[-10:]  # Top 10 candidates
+                top_stars_idx = np.argsort(star_proba)[-6:]   # Top 6 candidates
+                
+                # Convert to 1-based numbering
+                top_balls = top_balls_idx + 1
+                top_stars = top_stars_idx + 1
+                
+                # Random selection from top candidates
+                selected_balls = sorted(np.random.choice(top_balls, 5, replace=False))
+                selected_stars = sorted(np.random.choice(top_stars, 2, replace=False))
+                
+                # Calculate confidence based on selected numbers' probabilities
+                balls_confidence = np.mean([main_proba[b-1] for b in selected_balls])
+                stars_confidence = np.mean([star_proba[s-1] for s in selected_stars])
+                combined_confidence = balls_confidence * 0.7 + stars_confidence * 0.3
                 
                 ticket = {
-                    "ticket_id": i,
-                    "balls": balls,
-                    "stars": stars,
-                    "balls_str": " - ".join(f"{b:02d}" for b in balls),
-                    "stars_str": " - ".join(f"{s:02d}" for s in stars),
-                    "method": method,
-                    "seed": seed,
-                    "combined_score": float(combo.get("combined_score", 0.0))
+                    "ticket_id": i + 1,
+                    "balls": selected_balls,
+                    "stars": selected_stars,
+                    "balls_str": " - ".join(f"{b:02d}" for b in selected_balls),
+                    "stars_str": " - ".join(f"{s:02d}" for s in selected_stars),
+                    "method": "ensemble",
+                    "ensemble_type": "multi_algorithm",
+                    "base_confidence": float(combined_confidence)
                 }
                 
                 tickets.append(ticket)
@@ -367,7 +520,287 @@ class StreamlitAdapters:
             return tickets
             
         except Exception as e:
-            logger.error(f"Failed to generate ticket suggestions: {e}")
+            logger.error(f"Ensemble ticket generation failed: {e}")
+            return []
+    
+    def _generate_advanced_hybrid_tickets(self, n: int, seed: int, 
+                                        custom_weights: Optional[Dict[str, float]] = None) -> List[Dict[str, Any]]:
+        """Generate tickets using advanced hybrid strategy."""
+        
+        try:
+            if not HYBRID_STRATEGY_AVAILABLE:
+                logger.error("Hybrid strategy not available")
+                return []
+                
+            # Initialize hybrid strategy
+            hybrid_strategy = HybridPredictionStrategy()
+            
+            # Apply custom weights if provided
+            if custom_weights:
+                if "ml_weight" in custom_weights:
+                    hybrid_strategy.ml_weight = custom_weights["ml_weight"]
+                if "freq_weight" in custom_weights:
+                    hybrid_strategy.freq_weight = custom_weights["freq_weight"]
+                if "pattern_weight" in custom_weights:
+                    hybrid_strategy.pattern_weight = custom_weights["pattern_weight"]
+                if "gap_weight" in custom_weights:
+                    hybrid_strategy.gap_weight = custom_weights["gap_weight"]
+            
+            # Get ML predictions
+            try:
+                if ENSEMBLE_AVAILABLE:
+                    ensemble_trainer = EnsembleTrainer()
+                    ml_predictions = ensemble_trainer.predict_with_ensemble(return_probabilities=True)
+                else:
+                    raise ImportError("Ensemble not available")
+            except:
+                # Fallback to regular trainer
+                ml_predictions = self.trainer.predict_next_draw(return_probabilities=True)
+            
+            # Get historical data
+            df = self.repo.all_draws_df()
+            
+            # Generate hybrid predictions
+            combinations = hybrid_strategy.predict_hybrid(df, ml_predictions)
+            
+            # Convert to ticket format
+            tickets = []
+            for i, combo in enumerate(combinations[:n], 1):
+                ticket = {
+                    "ticket_id": i,
+                    "balls": combo["balls"],
+                    "stars": combo["stars"],
+                    "balls_str": " - ".join(f"{b:02d}" for b in combo["balls"]),
+                    "stars_str": " - ".join(f"{s:02d}" for s in combo["stars"]),
+                    "method": "advanced_hybrid",
+                    "strategy": combo.get("method", "unknown"),
+                    "base_confidence": combo.get("confidence", 50.0) / 100.0
+                }
+                tickets.append(ticket)
+            
+            return tickets
+            
+        except Exception as e:
+            logger.error(f"Advanced hybrid ticket generation failed: {e}")
+            return []
+    
+    def _generate_enhanced_tickets(self, n: int, method: str, seed: int, use_ensemble: bool) -> List[Dict[str, Any]]:
+        """Generate enhanced tickets using existing methods with improvements."""
+        
+        try:
+            if use_ensemble and ENSEMBLE_AVAILABLE:
+                # Try to use ensemble for scoring, fall back to regular trainer
+                try:
+                    ensemble_trainer = EnsembleTrainer()
+                    ball_scores = ensemble_trainer.score_balls_ensemble()
+                    star_scores = ensemble_trainer.score_stars_ensemble()
+                    model_type = "ensemble"
+                except:
+                    logger.warning("Ensemble scoring failed, using regular trainer")
+                    self.trainer.load_models()
+                    ball_scores = self.trainer.score_balls()
+                    star_scores = self.trainer.score_stars()
+                    model_type = "lightgbm"
+            else:
+                self.trainer.load_models()
+                ball_scores = self.trainer.score_balls()
+                star_scores = self.trainer.score_stars()
+                model_type = "lightgbm"
+            
+            # Generate combinations using enhanced scoring
+            combinations = self._generate_combinations_from_scores(
+                ball_scores, star_scores, n, method, seed
+            )
+            
+            # Convert to ticket format
+            tickets = []
+            for i, combo in enumerate(combinations, 1):
+                ticket = {
+                    "ticket_id": i,
+                    "balls": combo["balls"],
+                    "stars": combo["stars"],
+                    "balls_str": " - ".join(f"{b:02d}" for b in combo["balls"]),
+                    "stars_str": " - ".join(f"{s:02d}" for s in combo["stars"]),
+                    "method": f"enhanced_{method}",
+                    "model_type": model_type,
+                    "base_confidence": combo.get("score", 0.5)
+                }
+                tickets.append(ticket)
+            
+            return tickets
+            
+        except Exception as e:
+            logger.error(f"Enhanced ticket generation failed: {e}")
+            return []
+    
+    def _generate_combinations_from_scores(self, ball_scores: List[Tuple[int, float]], 
+                                         star_scores: List[Tuple[int, float]], 
+                                         n: int, method: str, seed: int) -> List[Dict[str, Any]]:
+        """Generate combinations from ball and star scores."""
+        
+        np.random.seed(seed)
+        
+        combinations = []
+        
+        # Sort by score
+        ball_scores.sort(key=lambda x: x[1], reverse=True)
+        star_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        for i in range(n):
+            if method == "topk":
+                # Select top balls with slight variation
+                top_balls = [ball for ball, _ in ball_scores[:8 + i]]
+                selected_balls = sorted(np.random.choice(top_balls, 5, replace=False))
+                
+                top_stars = [star for star, _ in star_scores[:3 + i]]
+                selected_stars = sorted(np.random.choice(top_stars, 2, replace=False))
+                
+            elif method == "random":
+                # Weighted random selection
+                ball_weights = np.array([score for _, score in ball_scores])
+                ball_weights = ball_weights / np.sum(ball_weights)
+                
+                star_weights = np.array([score for _, score in star_scores])
+                star_weights = star_weights / np.sum(star_weights)
+                
+                ball_numbers = [ball for ball, _ in ball_scores]
+                star_numbers = [star for star, _ in star_scores]
+                
+                selected_balls = sorted(np.random.choice(ball_numbers, 5, replace=False, p=ball_weights))
+                selected_stars = sorted(np.random.choice(star_numbers, 2, replace=False, p=star_weights))
+                
+            else:  # hybrid
+                # Mix of top and random
+                if i < n // 2:
+                    # First half: more top-heavy
+                    top_balls = [ball for ball, _ in ball_scores[:12]]
+                    selected_balls = sorted(np.random.choice(top_balls, 5, replace=False))
+                    
+                    top_stars = [star for star, _ in star_scores[:4]]
+                    selected_stars = sorted(np.random.choice(top_stars, 2, replace=False))
+                else:
+                    # Second half: more random
+                    all_balls = [ball for ball, _ in ball_scores]
+                    ball_weights = np.array([score for _, score in ball_scores])
+                    ball_weights = ball_weights / np.sum(ball_weights)
+                    
+                    selected_balls = sorted(np.random.choice(all_balls, 5, replace=False, p=ball_weights))
+                    
+                    all_stars = [star for star, _ in star_scores]
+                    star_weights = np.array([score for _, score in star_scores])
+                    star_weights = star_weights / np.sum(star_weights)
+                    
+                    selected_stars = sorted(np.random.choice(all_stars, 2, replace=False, p=star_weights))
+            
+            # Calculate combination score
+            ball_score = np.mean([score for ball, score in ball_scores if ball in selected_balls])
+            star_score = np.mean([score for star, score in star_scores if star in selected_stars])
+            combined_score = ball_score * 0.7 + star_score * 0.3
+            
+            combination = {
+                "balls": selected_balls,
+                "stars": selected_stars,
+                "score": combined_score
+            }
+            
+            combinations.append(combination)
+        
+        return combinations
+    
+    def _calculate_enhanced_confidence(self, ticket: Dict[str, Any]) -> float:
+        """Calculate enhanced confidence score for a ticket."""
+        
+        base_confidence = ticket.get("base_confidence", 0.5)
+        
+        # Add factors based on method
+        method_bonus = {
+            "ensemble": 0.15,
+            "advanced_hybrid": 0.12,
+            "enhanced_hybrid": 0.08,
+            "enhanced_topk": 0.05,
+            "enhanced_random": 0.02
+        }
+        
+        bonus = method_bonus.get(ticket.get("method", ""), 0)
+        
+        # Calculate final confidence (0-100)
+        final_confidence = min(95, (base_confidence + bonus) * 100)
+        
+        return round(final_confidence, 1)
+    
+    def _get_confidence_level(self, confidence: float) -> str:
+        """Get confidence level description."""
+        
+        if confidence >= 80:
+            return "Très Élevée"
+        elif confidence >= 65:
+            return "Élevée"
+        elif confidence >= 50:
+            return "Moyenne"
+        elif confidence >= 35:
+            return "Faible"
+        else:
+            return "Très Faible"
+    
+    def _generate_fallback_tickets(self, n: int, method: str, seed: int) -> List[Dict[str, Any]]:
+        """Generate basic fallback tickets if enhanced methods fail."""
+        
+        try:
+            # Use basic trainer method
+            self.trainer.load_models()
+            combinations = self.trainer.suggest_combinations(k=n, method=method, seed=seed)
+            
+            tickets = []
+            for i, combo in enumerate(combinations, 1):
+                ticket = {
+                    "ticket_id": i,
+                    "balls": [int(x) for x in combo["balls"]],
+                    "stars": [int(x) for x in combo["stars"]],
+                    "balls_str": " - ".join(f"{int(b):02d}" for b in combo["balls"]),
+                    "stars_str": " - ".join(f"{int(s):02d}" for s in combo["stars"]),
+                    "method": f"fallback_{method}",
+                    "confidence": 45.0,
+                    "confidence_level": "Moyenne",
+                    "generated_at": datetime.now().isoformat()
+                }
+                tickets.append(ticket)
+            
+            return tickets
+            
+        except Exception as e:
+            logger.error(f"Fallback ticket generation failed: {e}")
+            return []
+    
+    def _generate_minimal_tickets(self, n: int, seed: int) -> List[Dict[str, Any]]:
+        """Generate minimal random tickets as last resort."""
+        
+        try:
+            np.random.seed(seed)
+            tickets = []
+            
+            for i in range(n):
+                # Generate completely random valid tickets
+                balls = sorted(np.random.choice(range(1, 51), 5, replace=False))
+                stars = sorted(np.random.choice(range(1, 13), 2, replace=False))
+                
+                ticket = {
+                    "ticket_id": i + 1,
+                    "balls": balls.tolist(),
+                    "stars": stars.tolist(),
+                    "balls_str": " - ".join(f"{b:02d}" for b in balls),
+                    "stars_str": " - ".join(f"{s:02d}" for s in stars),
+                    "method": "minimal_random",
+                    "confidence": 20.0,
+                    "confidence_level": "Faible",
+                    "generated_at": datetime.now().isoformat()
+                }
+                tickets.append(ticket)
+            
+            logger.info(f"Generated {len(tickets)} minimal random tickets")
+            return tickets
+            
+        except Exception as e:
+            logger.error(f"Even minimal ticket generation failed: {e}")
             return []
     
     def fetch_last_draws(self, limit: int = 20) -> pd.DataFrame:
@@ -533,9 +966,29 @@ def get_scores() -> tuple:
     return streamlit_adapters.get_scores()
 
 
-def suggest_tickets_ui(n: int = 10, method: str = "hybrid", seed: int = 42) -> list:
-    """Generate lottery ticket suggestions."""
-    return streamlit_adapters.suggest_tickets_ui(n, method, seed)
+def suggest_tickets_ui(n: int = 10, method: str = "hybrid", seed: int = 42, 
+                      use_ensemble: bool = True, hybrid_weights: Optional[Dict[str, float]] = None) -> list:
+    """Generate enhanced lottery ticket suggestions."""
+    return streamlit_adapters.suggest_tickets_ui(n, method, seed, use_ensemble, hybrid_weights)
+
+
+def train_ensemble_models() -> dict:
+    """Train ensemble models if available."""
+    try:
+        from train_models import train_ensemble_models as train_ensemble_func
+        return train_ensemble_func()
+    except ImportError as e:
+        logger.warning(f"Ensemble training not available: {e}")
+        return {
+            "success": False,
+            "message": "Ensemble models not available. Please check installation."
+        }
+    except Exception as e:
+        logger.error(f"Error training ensemble models: {e}")
+        return {
+            "success": False,
+            "message": f"Error training ensemble: {str(e)}"
+        }
 
 
 def fetch_last_draws(limit: int = 20) -> pd.DataFrame:

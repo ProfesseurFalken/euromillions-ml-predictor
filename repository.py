@@ -211,8 +211,8 @@ class EuromillionsRepository:
             )
             
             # Convert draw_date to datetime for better handling
-            # Handle both string and datetime formats
-            df["draw_date"] = pd.to_datetime(df["draw_date"], errors='coerce')
+            # Handle both string and datetime formats with explicit format
+            df["draw_date"] = pd.to_datetime(df["draw_date"], format='%Y-%m-%d', errors='coerce')
             
             # Remove rows with invalid dates
             df = df.dropna(subset=['draw_date'])

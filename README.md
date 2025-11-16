@@ -23,8 +23,8 @@ A comprehensive machine learning system for EuroMillions lottery prediction with
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/euromillions-ml-prediction.git
-   cd euromillions-ml-prediction
+   git clone https://github.com/ProfesseurFalken/euromillions-ml-predictor.git
+   cd euromillions-ml-predictor
    ```
 
 2. **Setup environment (Windows)**
@@ -197,7 +197,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 If you encounter any issues or have questions:
 
-1. Check the [Issues](https://github.com/yourusername/euromillions-ml-prediction/issues) page
+1. Check the [Issues](https://github.com/ProfesseurFalken/euromillions-ml-predictor/issues) page
 2. Create a new issue with detailed information
 3. Include system information and error logs
 

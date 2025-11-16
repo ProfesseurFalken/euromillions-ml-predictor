@@ -202,7 +202,8 @@ class EuromillionsTrainer:
             }
             
             # Use MultiOutputClassifier for multi-label classification
-            model = MultiOutputClassifier(
+            # LGBMClassifier implements BaseEstimator at runtime
+            model = MultiOutputClassifier(  # type: ignore[arg-type]
                 lgb.LGBMClassifier(**lgb_params),
                 n_jobs=-1
             )
@@ -687,9 +688,10 @@ def predict_next_draw(return_probabilities: bool = False) -> Dict[str, Any]:
 def get_model_info() -> Dict[str, Any]:
     """Get information about currently trained models."""
     trainer = EuromillionsTrainer()
+    
     try:
         _, _, metadata = trainer.load_models()
-        return {
+        model_info = {
             "models_available": True,
             "trained_at": metadata["trained_at"],
             "data_range": {
@@ -703,8 +705,64 @@ def get_model_info() -> Dict[str, Any]:
             },
             "features": metadata["features"]
         }
+        
+        # Check for ensemble models
+        try:
+            from ensemble_models import EnsembleTrainer
+            ensemble_trainer = EnsembleTrainer()
+            if ensemble_trainer.models_exist():
+                model_info["ensemble_available"] = True
+                ensemble_info = ensemble_trainer.get_ensemble_info()
+                model_info["ensemble_performance"] = ensemble_info
+            else:
+                model_info["ensemble_available"] = False
+        except ImportError:
+            model_info["ensemble_available"] = False
+            
+        return model_info
+        
     except FileNotFoundError:
         return {
             "models_available": False,
+            "ensemble_available": False,
             "message": "No trained models found. Run train_latest() first."
+        }
+
+
+def train_ensemble_models() -> Dict[str, Any]:
+    """Train ensemble models if available."""
+    try:
+        from ensemble_models import EnsembleTrainer
+        ensemble_trainer = EnsembleTrainer()
+        
+        logger.info("🤖 Training ensemble models...")
+        result = ensemble_trainer.train_ensemble_models()
+        
+        if result.get("success", False):
+            logger.info(f"✅ Ensemble training completed: {result['message']}")
+            return {
+                "success": True,
+                "message": "Ensemble models trained successfully",
+                "models_trained": result.get("models_trained", []),
+                "performance": result.get("performance", {}),
+                "trained_at": datetime.now().isoformat()
+            }
+        else:
+            logger.error(f"❌ Ensemble training failed: {result['message']}")
+            return {
+                "success": False,
+                "message": f"Ensemble training failed: {result['message']}"
+            }
+            
+    except ImportError as e:
+        logger.warning(f"Ensemble models not available: {e}")
+        return {
+            "success": False,
+            "message": "Ensemble models not available. Please check installation."
+        }
+    except Exception as e:
+        logger.error(f"Error training ensemble models: {e}")
+        return {
+            "success": False,
+            "message": f"Error training ensemble: {str(e)}"
         }
