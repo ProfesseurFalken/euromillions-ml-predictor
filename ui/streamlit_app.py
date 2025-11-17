@@ -11,12 +11,38 @@ import os
 import json
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import sys
+import hashlib
+from collections import Counter
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Constants
+MAIN_NUM_MIN = 1
+MAIN_NUM_MAX = 50
+STAR_NUM_MIN = 1
+STAR_NUM_MAX = 12
+MAIN_NUMBERS_COUNT = 5
+STAR_NUMBERS_COUNT = 2
+SCORE_MAIN_WEIGHT = 10
+SCORE_STAR_WEIGHT = 5
+HYBRID_TOP_MAIN = 10
+HYBRID_TOP_STARS = 5
+
+# Method descriptions
+METHOD_EXPLANATIONS = {
+    "topk": "Sélectionne les boules/étoiles avec les plus hautes probabilités",
+    "random": "Échantillonnage aléatoire pondéré par les probabilités",
+    "hybrid": "Mélange de prédictions top et d'échantillonnage aléatoire",
+    "ensemble": "Combine plusieurs algorithmes ML (LightGBM, XGBoost, CatBoost, RandomForest)",
+    "advanced_hybrid": "Stratégie hybride avancée (ML + fréquences + motifs + écarts)",
+    "enhanced_hybrid": "Version améliorée de la méthode hybride avec ensemble",
+    "enhanced_topk": "Version améliorée du top-k avec ensemble",
+    "enhanced_random": "Version améliorée de l'aléatoire avec ensemble"
+}
 
 from streamlit_adapters import (
     init_full_history,
@@ -34,6 +60,16 @@ from streamlit_adapters import (
 # Import backtesting functionality
 import numpy as np
 from typing import Dict, List, Any
+
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def _get_cached_probabilities():
+    """Cache expensive ML probability calculations."""
+    import train_models
+    main_proba = train_models.score_balls()
+    star_proba = train_models.score_stars()
+    main_scores = {i: main_proba[i-1] for i in range(MAIN_NUM_MIN, MAIN_NUM_MAX + 1)}
+    star_scores = {i: star_proba[i-1] for i in range(STAR_NUM_MIN, STAR_NUM_MAX + 1)}
+    return main_scores, star_scores
 
 # Page configuration
 st.set_page_config(
@@ -82,6 +118,345 @@ def save_env_settings(settings):
     with open(".env", 'w', encoding='utf-8') as f:
         f.write('\n'.join(env_content))
 
+def load_config_presets():
+    """Load saved configuration presets."""
+    preset_file = Path("data/config_presets.json")
+    if preset_file.exists():
+        with open(preset_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_config_preset(name: str, config: dict):
+    """Save a configuration preset."""
+    presets = load_config_presets()
+    presets[name] = {
+        **config,
+        "saved_at": datetime.now().isoformat()
+    }
+    preset_file = Path("data/config_presets.json")
+    preset_file.parent.mkdir(exist_ok=True)
+    with open(preset_file, 'w', encoding='utf-8') as f:
+        json.dump(presets, f, indent=2)
+    return True
+
+def delete_config_preset(name: str):
+    """Delete a configuration preset."""
+    presets = load_config_presets()
+    if name in presets:
+        del presets[name]
+        with open("data/config_presets.json", 'w', encoding='utf-8') as f:
+            json.dump(presets, f, indent=2)
+        return True
+    return False
+
+def validate_ticket(main_numbers: list, stars: list, main_scores: dict = None, star_scores: dict = None) -> dict:
+    """Validate and score a user ticket."""
+    from repository import get_repository
+    
+    result = {
+        "valid": True,
+        "errors": [],
+        "warnings": [],
+        "score": 0,
+        "probability": 0,
+        "historical_matches": [],
+        "suggestions": []
+    }
+    
+    # Validation
+    if len(main_numbers) != MAIN_NUMBERS_COUNT:
+        result["valid"] = False
+        result["errors"].append(f"Doit contenir exactement {MAIN_NUMBERS_COUNT} numéros principaux")
+    
+    if len(stars) != STAR_NUMBERS_COUNT:
+        result["valid"] = False
+        result["errors"].append(f"Doit contenir exactement {STAR_NUMBERS_COUNT} étoiles")
+    
+    if any(n < MAIN_NUM_MIN or n > MAIN_NUM_MAX for n in main_numbers):
+        result["valid"] = False
+        result["errors"].append(f"Numéros principaux doivent être entre {MAIN_NUM_MIN} et {MAIN_NUM_MAX}")
+    
+    if any(s < STAR_NUM_MIN or s > STAR_NUM_MAX for s in stars):
+        result["valid"] = False
+        result["errors"].append(f"Étoiles doivent être entre {STAR_NUM_MIN} et {STAR_NUM_MAX}")
+    
+    if len(set(main_numbers)) != len(main_numbers):
+        result["valid"] = False
+        result["errors"].append("Numéros principaux en double détectés")
+    
+    if len(set(stars)) != len(stars):
+        result["valid"] = False
+        result["errors"].append("Étoiles en double détectées")
+    
+    if not result["valid"]:
+        return result
+    
+    # Calculate probability score
+    if main_scores and star_scores:
+        main_prob_sum = sum(main_scores.get(n, (n, 0))[1] if isinstance(main_scores.get(n), tuple) else main_scores.get(n, 0) for n in main_numbers)
+        star_prob_sum = sum(star_scores.get(s, (s, 0))[1] if isinstance(star_scores.get(s), tuple) else star_scores.get(s, 0) for s in stars)
+        result["probability"] = (main_prob_sum + star_prob_sum) / (MAIN_NUMBERS_COUNT + STAR_NUMBERS_COUNT)
+        result["score"] = result["probability"] * 100
+    
+    # Check historical matches
+    repo = get_repository()
+    all_draws = repo.all_draws_df()
+    
+    for idx, row in all_draws.tail(100).iterrows():
+        draw_main = [row['n1'], row['n2'], row['n3'], row['n4'], row['n5']]
+        draw_stars = [row['s1'], row['s2']]
+        
+        main_matches = len(set(main_numbers) & set(draw_main))
+        star_matches = len(set(stars) & set(draw_stars))
+        
+        if main_matches >= 3 or (main_matches >= 2 and star_matches >= 1):
+            result["historical_matches"].append({
+                "date": row['draw_date'],
+                "main_matches": main_matches,
+                "star_matches": star_matches
+            })
+    
+    # Warnings and suggestions
+    if all(n % 2 == 0 for n in main_numbers):
+        result["warnings"].append("Tous les numéros sont pairs - très rare")
+        result["suggestions"].append("Essayez un mélange de pairs et impairs")
+    
+    if all(n % 2 == 1 for n in main_numbers):
+        result["warnings"].append("Tous les numéros sont impairs - très rare")
+        result["suggestions"].append("Essayez un mélange de pairs et impairs")
+    
+    consecutive = sum(1 for i in range(len(sorted(main_numbers))-1) if sorted(main_numbers)[i+1] - sorted(main_numbers)[i] == 1)
+    if consecutive >= 3:
+        result["warnings"].append(f"{consecutive} numéros consécutifs détectés")
+    
+    return result
+
+def get_hot_cold_numbers(n_draws: int = 50) -> dict:
+    """Get hot and cold numbers from recent draws."""
+    from repository import get_repository
+    repo = get_repository()
+    recent_draws = repo.all_draws_df().tail(n_draws)
+    
+    main_freq = Counter()
+    star_freq = Counter()
+    
+    for _, row in recent_draws.iterrows():
+        for i in range(1, 6):
+            main_freq[row[f'n{i}']] += 1
+        for i in range(1, 3):
+            star_freq[row[f's{i}']] += 1
+    
+    hot_main = main_freq.most_common(10)
+    cold_main = [(n, main_freq.get(n, 0)) for n in range(MAIN_NUM_MIN, MAIN_NUM_MAX + 1) if main_freq.get(n, 0) <= 2]
+    
+    hot_stars = star_freq.most_common(5)
+    cold_stars = [(s, star_freq.get(s, 0)) for s in range(STAR_NUM_MIN, STAR_NUM_MAX + 1) if star_freq.get(s, 0) == 0]
+    
+    return {
+        "hot_main": hot_main,
+        "cold_main": sorted(cold_main, key=lambda x: x[1])[:10],
+        "hot_stars": hot_stars,
+        "cold_stars": cold_stars,
+        "n_draws": n_draws
+    }
+
+def get_next_draw_info() -> dict:
+    """Get information about the next EuroMillions draw."""
+    # EuroMillions draws on Tuesday and Friday
+    now = datetime.now()
+    days_ahead = (1 - now.weekday()) % 7  # Tuesday = 1
+    if days_ahead == 0 and now.hour >= 20:  # After 8 PM on Tuesday
+        days_ahead = 7
+    
+    next_tuesday = now + timedelta(days=days_ahead)
+    
+    days_ahead_friday = (4 - now.weekday()) % 7  # Friday = 4
+    if days_ahead_friday == 0 and now.hour >= 20:
+        days_ahead_friday = 7
+    
+    next_friday = now + timedelta(days=days_ahead_friday)
+    
+    next_draw = min(next_tuesday, next_friday, key=lambda d: abs((d - now).total_seconds()))
+    if next_draw < now:
+        next_draw = max(next_tuesday, next_friday)
+    
+    time_until = next_draw - now
+    
+    return {
+        "next_draw": next_draw,
+        "days": time_until.days,
+        "hours": time_until.seconds // 3600,
+        "minutes": (time_until.seconds % 3600) // 60,
+        "day_name": next_draw.strftime("%A"),
+        "date_str": next_draw.strftime("%d/%m/%Y")
+    }
+
+def save_performance_tracking(prediction: dict):
+    """Save a prediction for performance tracking."""
+    tracking_file = Path("data/performance_tracking.json")
+    tracking_file.parent.mkdir(exist_ok=True)
+    
+    predictions = []
+    if tracking_file.exists():
+        with open(tracking_file, 'r', encoding='utf-8') as f:
+            predictions = json.load(f)
+    
+    predictions.append({
+        **prediction,
+        "id": hashlib.md5(json.dumps(prediction, sort_keys=True).encode()).hexdigest()[:8],
+        "created_at": datetime.now().isoformat()
+    })
+    
+    # Keep only last 100 predictions
+    predictions = predictions[-100:]
+    
+    with open(tracking_file, 'w', encoding='utf-8') as f:
+        json.dump(predictions, f, indent=2)
+
+def load_performance_tracking() -> list:
+    """Load performance tracking data."""
+    tracking_file = Path("data/performance_tracking.json")
+    if tracking_file.exists():
+        with open(tracking_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return []
+
+def check_predictions_vs_draws() -> dict:
+    """Check predictions against actual draws."""
+    from repository import get_repository
+    
+    predictions = load_performance_tracking()
+    repo = get_repository()
+    all_draws = repo.all_draws_df()
+    
+    results = {
+        "total_predictions": len(predictions),
+        "checked": 0,
+        "wins": [],
+        "best_match": {"main": 0, "stars": 0},
+        "total_matches": {"main": 0, "stars": 0}
+    }
+    
+    for pred in predictions:
+        if "tickets" not in pred:
+            continue
+        
+        pred_date = datetime.fromisoformat(pred["created_at"]).date()
+        
+        for _, draw in all_draws.iterrows():
+            draw_date = datetime.fromisoformat(draw['draw_date']).date()
+            if draw_date >= pred_date:
+                results["checked"] += 1
+                draw_main = [draw['n1'], draw['n2'], draw['n3'], draw['n4'], draw['n5']]
+                draw_stars = [draw['s1'], draw['s2']]
+                
+                for ticket in pred["tickets"]:
+                    ticket_main = ticket.get('main') or ticket.get('balls', [])
+                    ticket_stars = ticket.get('stars', [])
+                    
+                    main_matches = len(set(ticket_main) & set(draw_main))
+                    star_matches = len(set(ticket_stars) & set(draw_stars))
+                    
+                    if main_matches >= 2:
+                        results["wins"].append({
+                            "date": draw['draw_date'],
+                            "main_matches": main_matches,
+                            "star_matches": star_matches,
+                            "ticket": ticket
+                        })
+                    
+                    if main_matches > results["best_match"]["main"]:
+                        results["best_match"]["main"] = main_matches
+                    if star_matches > results["best_match"]["stars"]:
+                        results["best_match"]["stars"] = star_matches
+                    
+                    results["total_matches"]["main"] += main_matches
+                    results["total_matches"]["stars"] += star_matches
+                break
+    
+    return results
+
+def generate_ticket_qr(ticket: dict) -> str:
+    """Generate QR code data URL for a ticket."""
+    try:
+        import qrcode
+        import io
+        import base64
+        
+        ticket_data = f"EuroMillions: {ticket['balls'][0]}-{ticket['balls'][1]}-{ticket['balls'][2]}-{ticket['balls'][3]}-{ticket['balls'][4]} + {ticket['stars'][0]}-{ticket['stars'][1]}"
+        
+        qr = qrcode.QRCode(version=1, box_size=10, border=2)
+        qr.add_data(ticket_data)
+        qr.make(fit=True)
+        
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+        buffer.seek(0)
+        
+        img_base64 = base64.b64encode(buffer.getvalue()).decode()
+        return f"data:image/png;base64,{img_base64}"
+    
+    except ImportError:
+        return None
+
+def generate_pdf_tickets(tickets: list, method: str, seed: int) -> bytes:
+    """Generate PDF with tickets."""
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import mm
+        from reportlab.pdfgen import canvas
+        import io
+        
+        buffer = io.BytesIO()
+        c = canvas.Canvas(buffer, pagesize=A4)
+        width, height = A4
+        
+        # Title
+        c.setFont("Helvetica-Bold", 20)
+        c.drawString(50, height - 50, "EuroMillions - Tickets Générés")
+        
+        c.setFont("Helvetica", 10)
+        c.drawString(50, height - 70, f"Date: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+        c.drawString(50, height - 85, f"Méthode: {method} | Seed: {seed}")
+        
+        # Tickets
+        y_pos = height - 120
+        c.setFont("Helvetica-Bold", 12)
+        
+        for i, ticket in enumerate(tickets):
+            if y_pos < 100:  # New page if needed
+                c.showPage()
+                y_pos = height - 50
+            
+            balls = ticket.get('balls') or ticket.get('main', [])
+            stars = ticket.get('stars', [])
+            
+            # Ticket number
+            c.setFont("Helvetica-Bold", 11)
+            c.drawString(50, y_pos, f"Ticket #{i+1}")
+            
+            # Numbers
+            c.setFont("Helvetica", 10)
+            numbers_str = " - ".join(str(b) for b in balls)
+            stars_str = " - ".join(str(s) for s in stars)
+            
+            c.drawString(150, y_pos, f"Numéros: {numbers_str}")
+            c.drawString(400, y_pos, f"Étoiles: {stars_str}")
+            
+            # Line separator
+            y_pos -= 25
+            c.line(50, y_pos, width - 50, y_pos)
+            y_pos -= 15
+        
+        c.save()
+        buffer.seek(0)
+        return buffer.getvalue()
+    
+    except ImportError:
+        return None
+
 def format_tickets_display(tickets):
     """Format enhanced tickets for display with confidence scores."""
     if not tickets:
@@ -121,6 +496,25 @@ def format_tickets_display(tickets):
     return '\n\n---\n\n'.join(display_lines)
 
 
+def _extract_probabilities(scores: dict, num_range: range) -> np.ndarray:
+    """Extract probabilities from score dictionary handling both tuples and floats."""
+    import numpy as np
+    # Check first element to determine type
+    first_val = scores[num_range[0]]
+    if isinstance(first_val, tuple):
+        return np.array([scores[i][1] for i in num_range])
+    else:
+        return np.array([scores[i] for i in num_range])
+
+def _generate_hybrid_selection(probs: np.ndarray, top_k: int, select_k: int, nums_range: range) -> list:
+    """Generate hybrid selection: top-K weighted random sampling."""
+    import numpy as np
+    top_idx = np.argsort(probs)[-top_k:]
+    top_probs = probs[top_idx]
+    top_probs_norm = (top_probs / top_probs.sum()).flatten()
+    top_nums = (top_idx + 1).flatten()
+    return sorted(np.random.choice(top_nums, size=select_k, replace=False, p=top_probs_norm).tolist())
+
 def _generate_tickets_fast(n: int, method: str, seed: int, main_scores: dict, star_scores: dict) -> List[dict]:
     """
     Génère des tickets RAPIDEMENT en utilisant des probabilités précalculées.
@@ -138,22 +532,27 @@ def _generate_tickets_fast(n: int, method: str, seed: int, main_scores: dict, st
     """
     import numpy as np
     
-    np.random.seed(seed)
+    # Input validation
+    if n <= 0:
+        raise ValueError(f"n must be positive, got {n}")
+    if method not in ["topk", "random", "hybrid", "ensemble", "advanced_hybrid"]:
+        raise ValueError(f"Unknown method: {method}")
+    
+    # Use RandomState for better reproducibility
+    rng = np.random.RandomState(seed)
     tickets = []
     
-    # Convertir dictionnaires en listes triées - FIXED: extraire seulement les probabilités
-    main_nums = list(range(1, 51))
-    star_nums = list(range(1, 13))
-    # main_scores et star_scores contiennent des tuples (num, prob) - extraire seulement prob
-    main_probs = np.array([main_scores[i][1] if isinstance(main_scores[i], tuple) else main_scores[i] for i in main_nums])
-    star_probs = np.array([star_scores[i][1] if isinstance(star_scores[i], tuple) else star_scores[i] for i in star_nums])
+    # Extract probabilities once (optimized)
+    main_nums = list(range(MAIN_NUM_MIN, MAIN_NUM_MAX + 1))
+    star_nums = list(range(STAR_NUM_MIN, STAR_NUM_MAX + 1))
+    main_probs = _extract_probabilities(main_scores, main_nums)
+    star_probs = _extract_probabilities(star_scores, star_nums)
     
     for i in range(n):
         if method == "topk":
-            # Top-K déterministe - FIXED v4
-            top_main_idx = np.argsort(main_probs)[-5:]
-            top_star_idx = np.argsort(star_probs)[-2:]
-            # Opération vectorielle numpy puis conversion en liste
+            # Top-K déterministe
+            top_main_idx = np.argsort(main_probs)[-MAIN_NUMBERS_COUNT:]
+            top_star_idx = np.argsort(star_probs)[-STAR_NUMBERS_COUNT:]
             main = sorted((top_main_idx + 1).tolist())
             stars = sorted((top_star_idx + 1).tolist())
         
@@ -161,58 +560,24 @@ def _generate_tickets_fast(n: int, method: str, seed: int, main_scores: dict, st
             # Aléatoire pondéré par probabilités
             main_probs_norm = main_probs / main_probs.sum()
             star_probs_norm = star_probs / star_probs.sum()
-            main = sorted(np.random.choice(main_nums, size=5, replace=False, p=main_probs_norm).tolist())
-            stars = sorted(np.random.choice(star_nums, size=2, replace=False, p=star_probs_norm).tolist())
+            main = sorted(rng.choice(main_nums, size=MAIN_NUMBERS_COUNT, replace=False, p=main_probs_norm).tolist())
+            stars = sorted(rng.choice(star_nums, size=STAR_NUMBERS_COUNT, replace=False, p=star_probs_norm).tolist())
         
-        elif method == "hybrid":
-            # Hybride : 60% topk + 40% random - FIXED v4
-            top_main_idx = np.argsort(main_probs)[-10:]  # Top 10 numéros (numpy array)
-            top_star_idx = np.argsort(star_probs)[-5:]   # Top 5 étoiles (numpy array)
-            
-            # Extraire les probabilités correspondantes (encore numpy)
-            top_main_probs = main_probs[top_main_idx]
-            top_star_probs = star_probs[top_star_idx]
-            
-            # Normaliser les probabilités
-            top_main_probs_norm = (top_main_probs / top_main_probs.sum()).flatten()
-            top_star_probs_norm = (top_star_probs / top_star_probs.sum()).flatten()
-            
-            # Convertir indices en numéros pour np.random.choice (force 1D)
-            top_main_nums = (top_main_idx + 1).flatten()
-            top_star_nums = (top_star_idx + 1).flatten()
-            
-            main = sorted(np.random.choice(top_main_nums, size=5, replace=False, p=top_main_probs_norm).tolist())
-            stars = sorted(np.random.choice(top_star_nums, size=2, replace=False, p=top_star_probs_norm).tolist())
-        
-        elif method in ["ensemble", "advanced_hybrid"]:
-            # Pour ensemble/advanced_hybrid - FIXED v4
-            top_main_idx = np.argsort(main_probs)[-10:]
-            top_star_idx = np.argsort(star_probs)[-5:]
-            
-            top_main_probs = main_probs[top_main_idx]
-            top_star_probs = star_probs[top_star_idx]
-            top_main_probs_norm = (top_main_probs / top_main_probs.sum()).flatten()
-            top_star_probs_norm = (top_star_probs / top_star_probs.sum()).flatten()
-            
-            # Convertir indices en numéros (force 1D)
-            top_main_nums = (top_main_idx + 1).flatten()
-            top_star_nums = (top_star_idx + 1).flatten()
-            
-            main = sorted(np.random.choice(top_main_nums, size=5, replace=False, p=top_main_probs_norm).tolist())
-            stars = sorted(np.random.choice(top_star_nums, size=2, replace=False, p=top_star_probs_norm).tolist())
+        elif method in ["hybrid", "ensemble", "advanced_hybrid"]:
+            # Hybrid selection: top-K weighted random
+            # Note: ensemble/advanced_hybrid use same fast approximation in backtesting
+            main = _generate_hybrid_selection(main_probs, HYBRID_TOP_MAIN, MAIN_NUMBERS_COUNT, main_nums)
+            stars = _generate_hybrid_selection(star_probs, HYBRID_TOP_STARS, STAR_NUMBERS_COUNT, star_nums)
         
         else:
-            # Fallback : random simple
-            main = sorted(np.random.choice(main_nums, size=5, replace=False).tolist())
-            stars = sorted(np.random.choice(star_nums, size=2, replace=False).tolist())
+            # Fallback: uniform random
+            main = sorted(rng.choice(main_nums, size=MAIN_NUMBERS_COUNT, replace=False).tolist())
+            stars = sorted(rng.choice(star_nums, size=STAR_NUMBERS_COUNT, replace=False).tolist())
         
         tickets.append({
             'main': main,
             'stars': stars
         })
-        
-        # Variation de la graine pour chaque ticket
-        np.random.seed(seed + i + 1)
     
     return tickets
 
@@ -240,10 +605,10 @@ def run_backtesting(seeds: List[int], methods: List[str], n_draws: int, n_ticket
     test_draws = all_draws.tail(n_draws)
     
     # ====== PRÉPARATION DES DONNÉES ======
-    # Convertir les colonnes n1-n5, s1-s2 en listes 'main' et 'stars'
+    # Convertir les colonnes n1-n5, s1-s2 en listes 'main' et 'stars' (vectorized)
     test_draws = test_draws.copy()
-    test_draws['main'] = test_draws.apply(lambda row: [row['n1'], row['n2'], row['n3'], row['n4'], row['n5']], axis=1)
-    test_draws['stars'] = test_draws.apply(lambda row: [row['s1'], row['s2']], axis=1)
+    test_draws['main'] = test_draws[['n1', 'n2', 'n3', 'n4', 'n5']].values.tolist()
+    test_draws['stars'] = test_draws[['s1', 's2']].values.tolist()
     
     # Vérification des données
     if len(test_draws) == 0:
@@ -262,19 +627,15 @@ def run_backtesting(seeds: List[int], methods: List[str], n_draws: int, n_ticket
     status_precalc.text("⚡ Optimisation : Précalcul des probabilités ML (une seule fois)...")
     
     try:
-        # Charger les modèles une fois en cache
-        main_proba = train_models.score_balls()
-        star_proba = train_models.score_stars()
-        
-        # Créer un dictionnaire de probabilités précalculées
-        main_scores = {i: main_proba[i-1] for i in range(1, 51)}
-        star_scores = {i: star_proba[i-1] for i in range(1, 13)}
-        
-        status_precalc.text("✅ Probabilités ML précalculées et mises en cache")
+        # Utiliser le cache Streamlit pour les probabilités
+        main_scores, star_scores = _get_cached_probabilities()
+        status_precalc.text("✅ Probabilités ML chargées depuis le cache")
         time.sleep(0.5)
         status_precalc.empty()
     except Exception as e:
-        status_precalc.text(f"⚠️ Impossible de précalculer les probas, fallback au mode classique")
+        status_precalc.text(f"⚠️ Erreur lors du chargement des probabilités: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         main_scores = None
         star_scores = None
     
@@ -283,12 +644,23 @@ def run_backtesting(seeds: List[int], methods: List[str], n_draws: int, n_ticket
     progress_bar = st.progress(0)
     status_text = st.empty()
     current_test = 0
+    start_time = time.time()
     
     for seed in seeds:
         for method in methods:
             current_test += 1
-            progress_bar.progress(current_test / total_tests)
-            status_text.text(f"⚡ Test {current_test}/{total_tests}: seed={seed}, method={method}")
+            progress_pct = current_test / total_tests
+            progress_bar.progress(progress_pct)
+            
+            # Calculate ETA
+            elapsed = time.time() - start_time
+            if current_test > 1:
+                eta_seconds = (elapsed / (current_test - 1)) * (total_tests - current_test)
+                eta_str = f" | ETA: {int(eta_seconds)}s"
+            else:
+                eta_str = ""
+            
+            status_text.text(f"⚡ Test {current_test}/{total_tests} ({progress_pct*100:.1f}%): seed={seed}, method={method}{eta_str}")
             
             total_main_matches = 0
             total_star_matches = 0
@@ -302,16 +674,18 @@ def run_backtesting(seeds: List[int], methods: List[str], n_draws: int, n_ticket
             for idx, actual_draw in test_draws.iterrows():
                 try:
                     # ====== GÉNÉRATION OPTIMISÉE ======
-                    # Utiliser les probabilités précalculées au lieu de recharger les modèles
+                    # IMPORTANT: Pour le backtesting, TOUTES les méthodes utilisent _generate_tickets_fast
+                    # avec les probabilités précalculées pour éviter de prendre des heures
+                    # Les méthodes ensemble/advanced_hybrid utiliseront une approximation rapide
                     if main_scores and star_scores:
                         tickets = _generate_tickets_fast(n_tickets, method, seed, main_scores, star_scores)
                     else:
-                        # Fallback si précalcul impossible
+                        # Fallback si précalcul impossible (ne devrait jamais arriver)
                         tickets = suggest_tickets_ui(
                             n=n_tickets,
                             method=method,
                             seed=seed,
-                            use_ensemble=(method == "ensemble")
+                            use_ensemble=False
                         )
                     
                     # CORRECTIF: Extraire les numéros du DataFrame (colonnes n1-n5, s1-s2)
@@ -321,12 +695,16 @@ def run_backtesting(seeds: List[int], methods: List[str], n_draws: int, n_ticket
                     
                     # Évaluer chaque ticket
                     for ticket in tickets:
-                        main_matches = len(set(ticket['main']) & set(actual_main))
-                        star_matches = len(set(ticket['stars']) & set(actual_stars))
+                        # Normaliser la structure: 'balls' ou 'main' pour les numéros principaux
+                        ticket_main = ticket.get('main') or ticket.get('balls', [])
+                        ticket_stars = ticket.get('stars', [])
+                        
+                        main_matches = len(set(ticket_main) & set(actual_main))
+                        star_matches = len(set(ticket_stars) & set(actual_stars))
                         
                         total_main_matches += main_matches
                         total_star_matches += star_matches
-                        score = main_matches * 10 + star_matches * 5
+                        score = main_matches * SCORE_MAIN_WEIGHT + star_matches * SCORE_STAR_WEIGHT
                         total_score += score
                         
                         # Meilleur résultat
@@ -346,12 +724,17 @@ def run_backtesting(seeds: List[int], methods: List[str], n_draws: int, n_ticket
                             any_win_count += 1
                             
                 except Exception as e:
-                    # AMÉLIORATION: Logger les erreurs au lieu de les ignorer silencieusement
+                    # Log detailed error information for debugging
                     import traceback
-                    error_msg = f"❌ Erreur seed={seed}, method={method}, draw={idx}: {str(e)}"
-                    st.warning(error_msg)
-                    print(f"\n{error_msg}")
+                    error_msg = f"❌ Erreur configuration: seed={seed}, method={method}, tirage={idx}"
+                    error_detail = f"Type: {type(e).__name__}, Message: {str(e)}"
+                    st.warning(f"{error_msg}\n{error_detail}")
+                    # Print full traceback to console for developers
+                    print(f"\n{'='*60}")
+                    print(error_msg)
+                    print(error_detail)
                     print(traceback.format_exc())
+                    print('='*60)
                     continue
             
             n_total_tickets = n_draws * n_tickets
@@ -387,8 +770,131 @@ def main():
     st.title("🎲 EuroMillions — Console Graphique")
     st.markdown("Interface de gestion complète pour le système de prédiction EuroMillions")
     
+    # Smart Suggestions Engine
+    try:
+        from repository import get_repository
+        repo = get_repository()
+        all_draws = repo.all_draws_df()
+        
+        suggestions = []
+        
+        # Check data freshness
+        if not all_draws.empty:
+            last_draw_date = datetime.fromisoformat(all_draws.iloc[-1]['draw_date'])
+            days_since = (datetime.now() - last_draw_date).days
+            
+            if days_since > 7:
+                suggestions.append({
+                    "type": "warning",
+                    "icon": "⚠️",
+                    "text": f"Données obsolètes ({days_since} jours) - Rafraîchissez depuis la FDJ",
+                    "action": "Scroller vers 'Scraping FDJ'"
+                })
+            elif days_since <= 1:
+                suggestions.append({
+                    "type": "success",
+                    "icon": "✅",
+                    "text": "Données à jour! Prêt pour de nouvelles prédictions",
+                    "action": None
+                })
+        
+        # Check model status
+        model_file = Path("models/main_model.pkl")
+        if model_file.exists():
+            model_age_days = (datetime.now() - datetime.fromtimestamp(model_file.stat().st_mtime)).days
+            if model_age_days > 30:
+                suggestions.append({
+                    "type": "info",
+                    "icon": "🔄",
+                    "text": f"Modèles entraînés il y a {model_age_days} jours - Réentraînement recommandé",
+                    "action": "Section 'Entraînement ML'"
+                })
+        else:
+            suggestions.append({
+                "type": "error",
+                "icon": "❌",
+                "text": "Modèles ML non entraînés - Entraînez avant de générer des tickets",
+                "action": "Allez à 'Entraînement ML'"
+            })
+        
+        # Check backtesting results
+        if len(all_draws) >= 50:
+            suggestions.append({
+                "type": "info",
+                "icon": "🔬",
+                "text": "Assez de données pour un backtesting complet - Testez vos configurations",
+                "action": "Section 'Backtesting'"
+            })
+        
+        # Check hot numbers
+        hot_cold = get_hot_cold_numbers(20)
+        if hot_cold["hot_main"]:
+            hot_nums = [str(n[0]) for n in hot_cold["hot_main"][:3]]
+            suggestions.append({
+                "type": "success",
+                "icon": "🔥",
+                "text": f"Numéros chauds actuels: {', '.join(hot_nums)}",
+                "action": "Voir 'Analyse Historique'"
+            })
+        
+        # Display suggestions
+        if suggestions:
+            for sug in suggestions[:3]:  # Show max 3 suggestions
+                if sug["type"] == "warning":
+                    st.warning(f"{sug['icon']} {sug['text']}")
+                elif sug["type"] == "error":
+                    st.error(f"{sug['icon']} {sug['text']}")
+                elif sug["type"] == "success":
+                    st.success(f"{sug['icon']} {sug['text']}")
+                else:
+                    st.info(f"{sug['icon']} {sug['text']}")
+    
+    except Exception as e:
+        pass  # Silently fail - suggestions are non-critical
+    
+    st.markdown("---")
+    
     # Sidebar configuration
     with st.sidebar:
+        # Draw countdown
+        next_draw = get_next_draw_info()
+        st.markdown(f"### 🎰 Prochain tirage")
+        st.info(f"**{next_draw['day_name']} {next_draw['date_str']}**")
+        if next_draw['days'] == 0:
+            st.markdown(f"⏰ Dans **{next_draw['hours']}h {next_draw['minutes']}min**")
+        else:
+            st.markdown(f"📅 Dans **{next_draw['days']} jours**")
+        
+        st.markdown("---")
+        
+        # Configuration Presets
+        st.header("💾 Préréglages")
+        presets = load_config_presets()
+        
+        if presets:
+            preset_names = list(presets.keys())
+            selected_preset = st.selectbox(
+                "Charger une configuration",
+                ["-- Nouveau --"] + preset_names,
+                key="preset_selector"
+            )
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if selected_preset != "-- Nouveau --" and st.button("📥 Charger", use_container_width=True):
+                    preset_config = presets[selected_preset]
+                    st.session_state.update(preset_config)
+                    st.success(f"✅ {selected_preset} chargé!")
+                    st.rerun()
+            
+            with col2:
+                if selected_preset != "-- Nouveau --" and st.button("🗑️ Supprimer", use_container_width=True):
+                    delete_config_preset(selected_preset)
+                    st.success("Supprimé!")
+                    st.rerun()
+        
+        st.markdown("---")
+        
         st.header("🎯 Suggestions")
         
         # Suggestion parameters
@@ -664,6 +1170,97 @@ def main():
     
     st.markdown("---")
     
+    # Section 3.2: Historical Analysis Dashboard
+    st.header("📊 Analyse Historique")
+    
+    analysis_type = st.radio(
+        "Type d'analyse",
+        ["🔥 Numéros Chauds/Froids", "📈 Distribution", "🔍 Patterns"],
+        horizontal=True
+    )
+    
+    if analysis_type == "🔥 Numéros Chauds/Froids":
+        period = st.select_slider(
+            "Période d'analyse",
+            options=[10, 20, 50, 100, 200],
+            value=50,
+            format_func=lambda x: f"Derniers {x} tirages"
+        )
+        
+        if st.button("🔍 Analyser", use_container_width=True):
+            with st.spinner("Analyse en cours..."):
+                hot_cold = get_hot_cold_numbers(period)
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("🔥 Numéros CHAUDS")
+                    st.caption(f"Plus fréquents sur {period} tirages")
+                    
+                    hot_main_df = pd.DataFrame(hot_cold["hot_main"], columns=["Numéro", "Fréquence"])
+                    hot_main_df["Taux %"] = (hot_main_df["Fréquence"] / period * 100).round(1)
+                    st.dataframe(hot_main_df, use_container_width=True, hide_index=True)
+                    
+                    st.caption("⭐ Étoiles chaudes")
+                    hot_stars_df = pd.DataFrame(hot_cold["hot_stars"], columns=["Étoile", "Fréquence"])
+                    st.dataframe(hot_stars_df, use_container_width=True, hide_index=True)
+                
+                with col2:
+                    st.subheader("❄️ Numéros FROIDS")
+                    st.caption("Moins fréquents - potentiel de retour")
+                    
+                    cold_main_df = pd.DataFrame(hot_cold["cold_main"], columns=["Numéro", "Fréquence"])
+                    st.dataframe(cold_main_df, use_container_width=True, hide_index=True)
+                    
+                    if hot_cold["cold_stars"]:
+                        st.caption("⭐ Étoiles froides")
+                        cold_stars_df = pd.DataFrame(hot_cold["cold_stars"], columns=["Étoile", "Fréquence"])
+                        st.dataframe(cold_stars_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("Toutes les étoiles sont apparues récemment")
+    
+    elif analysis_type == "📈 Distribution":
+        from repository import get_repository
+        repo = get_repository()
+        recent_draws = repo.all_draws_df().tail(100)
+        
+        # Odd/Even analysis
+        odd_count = 0
+        even_count = 0
+        
+        for _, row in recent_draws.iterrows():
+            for i in range(1, 6):
+                if row[f'n{i}'] % 2 == 0:
+                    even_count += 1
+                else:
+                    odd_count += 1
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Pairs", f"{even_count} ({even_count/(even_count+odd_count)*100:.1f}%)")
+        with col2:
+            st.metric("Impairs", f"{odd_count} ({odd_count/(even_count+odd_count)*100:.1f}%)")
+        
+        st.info("💡 Distribution équilibrée idéale : ~50% pairs, ~50% impairs")
+    
+    else:  # Patterns
+        st.info("🔍 Analyse des patterns communes")
+        from repository import get_repository
+        repo = get_repository()
+        recent_draws = repo.all_draws_df().tail(50)
+        
+        consecutive_count = 0
+        for _, row in recent_draws.iterrows():
+            nums = sorted([row['n1'], row['n2'], row['n3'], row['n4'], row['n5']])
+            for i in range(len(nums)-1):
+                if nums[i+1] - nums[i] == 1:
+                    consecutive_count += 1
+        
+        st.metric("Numéros consécutifs", f"{consecutive_count} occurrences", f"{consecutive_count/50:.1f} par tirage")
+        st.caption("Moyenne dans les 50 derniers tirages")
+    
+    st.markdown("---")
+    
     # Section 3.5: Backtesting - Optimisation des paramètres
     st.header("🔬 Backtesting - Optimisation des paramètres")
     
@@ -715,6 +1312,10 @@ def main():
         
         if not methods_to_test:
             st.warning("⚠️ Sélectionnez au moins une méthode")
+        
+        # Avertissement pour ensemble/advanced_hybrid
+        if "ensemble" in methods_to_test or "advanced_hybrid" in methods_to_test:
+            st.info("ℹ️ **Note:** Les méthodes ensemble/advanced_hybrid utilisent une approximation rapide dans le backtesting (similaire à hybrid) pour éviter des temps d'exécution de plusieurs heures.")
     
     col3, col4 = st.columns(2)
     
@@ -846,6 +1447,210 @@ def main():
     
     st.markdown("---")
     
+    # Section 3.7: A/B Testing Mode
+    st.header("🧪 Mode Test A/B")
+    
+    with st.expander("⚡ Comparer deux configurations", expanded=False):
+        st.markdown("Testez et comparez deux méthodes côte à côte pour identifier la plus performante")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("🅰️ Configuration A")
+            method_a = st.selectbox(
+                "Méthode A",
+                options=["hybrid", "ensemble", "advanced_hybrid", "topk", "random"],
+                index=0,
+                key="ab_method_a"
+            )
+            seed_a = st.number_input("Seed A", min_value=1, max_value=9999, value=42, key="ab_seed_a")
+        
+        with col2:
+            st.subheader("🅱️ Configuration B")
+            method_b = st.selectbox(
+                "Méthode B",
+                options=["hybrid", "ensemble", "advanced_hybrid", "topk", "random"],
+                index=1,
+                key="ab_method_b"
+            )
+            seed_b = st.number_input("Seed B", min_value=1, max_value=9999, value=123, key="ab_seed_b")
+        
+        n_tickets_ab = st.slider("Nombre de tickets par configuration", 10, 100, 50, 10)
+        
+        if st.button("▶️ Lancer le test A/B", type="primary", use_container_width=True):
+            with st.spinner("Exécution du test A/B..."):
+                try:
+                    from repository import get_repository
+                    repo = get_repository()
+                    all_draws = repo.all_draws_df()
+                    
+                    if len(all_draws) < 30:
+                        st.warning("⚠️ Pas assez de données pour un test significatif (minimum 30 tirages)")
+                    else:
+                        # Split data: train on first 80%, test on last 20%
+                        split_idx = int(len(all_draws) * 0.8)
+                        test_draws = all_draws.iloc[split_idx:].copy()
+                        
+                        main_scores, star_scores = _get_cached_probabilities()
+                        
+                        results_a = {"wins": 0, "total_main": 0, "total_stars": 0, "best_match": (0, 0)}
+                        results_b = {"wins": 0, "total_main": 0, "total_stars": 0, "best_match": (0, 0)}
+                        
+                        # Generate tickets for both configs
+                        tickets_a = _generate_tickets_fast(n_tickets_ab, method_a, seed_a, main_scores, star_scores)
+                        tickets_b = _generate_tickets_fast(n_tickets_ab, method_b, seed_b, main_scores, star_scores)
+                        
+                        # Test against each draw
+                        for _, draw in test_draws.iterrows():
+                            draw_main = [draw['n1'], draw['n2'], draw['n3'], draw['n4'], draw['n5']]
+                            draw_stars = [draw['s1'], draw['s2']]
+                            
+                            # Check config A
+                            for ticket in tickets_a:
+                                ticket_main = ticket.get('main') or ticket.get('balls', [])
+                                ticket_stars = ticket.get('stars', [])
+                                
+                                main_match = len(set(ticket_main) & set(draw_main))
+                                star_match = len(set(ticket_stars) & set(draw_stars))
+                                
+                                results_a["total_main"] += main_match
+                                results_a["total_stars"] += star_match
+                                
+                                if main_match >= 2:
+                                    results_a["wins"] += 1
+                                
+                                if (main_match, star_match) > results_a["best_match"]:
+                                    results_a["best_match"] = (main_match, star_match)
+                            
+                            # Check config B
+                            for ticket in tickets_b:
+                                ticket_main = ticket.get('main') or ticket.get('balls', [])
+                                ticket_stars = ticket.get('stars', [])
+                                
+                                main_match = len(set(ticket_main) & set(draw_main))
+                                star_match = len(set(ticket_stars) & set(draw_stars))
+                                
+                                results_b["total_main"] += main_match
+                                results_b["total_stars"] += star_match
+                                
+                                if main_match >= 2:
+                                    results_b["wins"] += 1
+                                
+                                if (main_match, star_match) > results_b["best_match"]:
+                                    results_b["best_match"] = (main_match, star_match)
+                        
+                        # Display results
+                        st.success(f"✅ Test complété sur {len(test_draws)} tirages")
+                        
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.subheader("🅰️ Résultats A")
+                            st.metric("Gains (2+)", results_a["wins"])
+                            st.metric("Meilleur match", f"{results_a['best_match'][0]}+{results_a['best_match'][1]}")
+                            avg_main_a = results_a["total_main"] / (n_tickets_ab * len(test_draws))
+                            avg_stars_a = results_a["total_stars"] / (n_tickets_ab * len(test_draws))
+                            st.caption(f"Moy: {avg_main_a:.2f} num + {avg_stars_a:.2f} étoiles")
+                        
+                        with col2:
+                            st.subheader("🅱️ Résultats B")
+                            st.metric("Gains (2+)", results_b["wins"])
+                            st.metric("Meilleur match", f"{results_b['best_match'][0]}+{results_b['best_match'][1]}")
+                            avg_main_b = results_b["total_main"] / (n_tickets_ab * len(test_draws))
+                            avg_stars_b = results_b["total_stars"] / (n_tickets_ab * len(test_draws))
+                            st.caption(f"Moy: {avg_main_b:.2f} num + {avg_stars_b:.2f} étoiles")
+                        
+                        # Determine winner
+                        score_a = results_a["wins"] * 10 + avg_main_a * 5 + avg_stars_a * 3
+                        score_b = results_b["wins"] * 10 + avg_main_b * 5 + avg_stars_b * 3
+                        
+                        if score_a > score_b:
+                            st.success(f"🏆 Configuration A gagne avec un score de {score_a:.1f} vs {score_b:.1f}")
+                        elif score_b > score_a:
+                            st.success(f"🏆 Configuration B gagne avec un score de {score_b:.1f} vs {score_a:.1f}")
+                        else:
+                            st.info("🤝 Match nul - performances équivalentes")
+                
+                except Exception as e:
+                    st.error(f"❌ Erreur lors du test A/B: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+    
+    st.markdown("---")
+    
+    # Section 3.8: Smart Ticket Validator
+    st.header("🎲 Validateur de Ticket Intelligent")
+    
+    with st.expander("✏️ Valider votre ticket personnel", expanded=False):
+        st.markdown("Entrez vos numéros pour obtenir une analyse complète")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Numéros principaux (5)")
+            user_main = []
+            cols = st.columns(5)
+            for i in range(5):
+                with cols[i]:
+                    num = st.number_input(f"N{i+1}", min_value=1, max_value=50, value=1+i*10, key=f"user_main_{i}")
+                    user_main.append(num)
+        
+        with col2:
+            st.subheader("Étoiles (2)")
+            user_stars = []
+            cols = st.columns(2)
+            for i in range(2):
+                with cols[i]:
+                    star = st.number_input(f"E{i+1}", min_value=1, max_value=12, value=1+i*5, key=f"user_star_{i}")
+                    user_stars.append(star)
+        
+        if st.button("🔍 Valider et Analyser", use_container_width=True, type="primary"):
+            with st.spinner("Analyse en cours..."):
+                try:
+                    # Get probabilities for scoring
+                    main_scores, star_scores = _get_cached_probabilities()
+                    validation = validate_ticket(user_main, user_stars, main_scores, star_scores)
+                    
+                    if not validation["valid"]:
+                        st.error("❌ Ticket invalide")
+                        for error in validation["errors"]:
+                            st.error(f"• {error}")
+                    else:
+                        st.success("✅ Ticket valide!")
+                        
+                        # Display score
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Score ML", f"{validation['score']:.1f}/100")
+                        with col2:
+                            st.metric("Probabilité", f"{validation['probability']*100:.2f}%")
+                        with col3:
+                            matches = len(validation["historical_matches"])
+                            st.metric("Matches historiques", matches, f"sur 100 tirages")
+                        
+                        # Warnings
+                        if validation["warnings"]:
+                            st.warning("⚠️ Avertissements")
+                            for warning in validation["warnings"]:
+                                st.caption(f"• {warning}")
+                        
+                        # Suggestions
+                        if validation["suggestions"]:
+                            st.info("💡 Suggestions d'amélioration")
+                            for suggestion in validation["suggestions"]:
+                                st.caption(f"• {suggestion}")
+                        
+                        # Historical matches
+                        if validation["historical_matches"]:
+                            with st.expander(f"📜 Détail des {len(validation['historical_matches'])} correspondances historiques"):
+                                for match in validation["historical_matches"][:10]:
+                                    st.caption(f"{match['date']}: {match['main_matches']} numéros + {match['star_matches']} étoiles")
+                
+                except Exception as e:
+                    st.error(f"❌ Erreur lors de la validation: {e}")
+    
+    st.markdown("---")
+    
     # Section 4: Generate Tickets
     st.header("🎫 Générer des tickets 5+2")
     
@@ -884,11 +1689,11 @@ def main():
                     }, indent=2, ensure_ascii=False)
                     
                     # Download buttons
-                    col1, col2 = st.columns(2)
+                    col1, col2, col3, col4 = st.columns(4)
                     
                     with col1:
                         st.download_button(
-                            label="⬇️ Télécharger CSV",
+                            label="⬇️ CSV",
                             data=csv_content,
                             file_name=f"euromillions_tickets_{timestamp}.csv",
                             mime="text/csv",
@@ -897,34 +1702,221 @@ def main():
                     
                     with col2:
                         st.download_button(
-                            label="⬇️ Télécharger JSON",
+                            label="⬇️ JSON",
                             data=json_content,
                             file_name=f"euromillions_tickets_{timestamp}.json",
                             mime="application/json",
                             use_container_width=True
                         )
                     
+                    with col3:
+                        # TXT format
+                        txt_content = f"EuroMillions Tickets\nGénérés le: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
+                        txt_content += f"Méthode: {method} | Seed: {seed}\n"
+                        txt_content += "=" * 50 + "\n\n"
+                        for ticket in tickets:
+                            balls = ticket['balls']
+                            stars = ticket['stars']
+                            txt_content += f"Ticket {ticket['ticket_id']}: {balls[0]}-{balls[1]}-{balls[2]}-{balls[3]}-{balls[4]} + {stars[0]}-{stars[1]}\n"
+                        
+                        st.download_button(
+                            label="⬇️ TXT",
+                            data=txt_content,
+                            file_name=f"euromillions_tickets_{timestamp}.txt",
+                            mime="text/plain",
+                            use_container_width=True
+                        )
+                    
+                    with col4:
+                        # PDF format
+                        pdf_bytes = generate_pdf_tickets(tickets, method, seed)
+                        if pdf_bytes:
+                            st.download_button(
+                                label="⬇️ PDF",
+                                data=pdf_bytes,
+                                file_name=f"euromillions_tickets_{timestamp}.pdf",
+                                mime="application/pdf",
+                                use_container_width=True
+                            )
+                        else:
+                            if st.button("📄 PDF", disabled=True, use_container_width=True):
+                                pass
+                            st.caption("Install reportlab")
+                    
+                    # QR Code option (expandable)
+                    with st.expander("📱 QR Codes pour tickets", expanded=False):
+                        st.caption("Scannez ces QR codes pour sauvegarder vos tickets")
+                        
+                        qr_available = False
+                        try:
+                            import qrcode
+                            qr_available = True
+                        except ImportError:
+                            st.warning("📦 Module qrcode non installé. Installez avec: pip install qrcode[pil]")
+                        
+                        if qr_available:
+                            cols_per_row = 3
+                            for i in range(0, min(len(tickets), 9), cols_per_row):  # Show max 9 QR codes
+                                cols = st.columns(cols_per_row)
+                                for j, col in enumerate(cols):
+                                    if i + j < len(tickets):
+                                        ticket = tickets[i + j]
+                                        with col:
+                                            qr_data_url = generate_ticket_qr(ticket)
+                                            if qr_data_url:
+                                                st.markdown(f"**Ticket {ticket['ticket_id']}**")
+                                                st.markdown(f'<img src="{qr_data_url}" width="150"/>', unsafe_allow_html=True)
+                            
+                            if len(tickets) > 9:
+                                st.info(f"Affichage de 9 QR codes sur {len(tickets)} tickets")
+                    
                     # Method explanation
                     st.info(f"**Méthode utilisée:** {method} | **Graine:** {seed}")
+                    st.caption(METHOD_EXPLANATIONS.get(method, "Méthode personnalisée"))
                     
-                    method_explanations = {
-                        "topk": "Sélectionne les boules/étoiles avec les plus hautes probabilités",
-                        "random": "Échantillonnage aléatoire pondéré par les probabilités",
-                        "hybrid": "Mélange de prédictions top et d'échantillonnage aléatoire",
-                        "ensemble": "Combine plusieurs algorithmes ML (LightGBM, XGBoost, CatBoost, RandomForest)",
-                        "advanced_hybrid": "Stratégie hybride avancée (ML + fréquences + motifs + écarts)",
-                        "enhanced_hybrid": "Version améliorée de la méthode hybride avec ensemble",
-                        "enhanced_topk": "Version améliorée du top-k avec ensemble",
-                        "enhanced_random": "Version améliorée de l'aléatoire avec ensemble"
+                    # Number Distribution Visualizer
+                    with st.expander("📊 Distribution des numéros générés", expanded=False):
+                        st.subheader("Analyse de couverture")
+                        
+                        # Count frequency of each number
+                        main_freq = Counter()
+                        star_freq = Counter()
+                        
+                        for ticket in tickets:
+                            for num in ticket['balls']:
+                                main_freq[num] += 1
+                            for star in ticket['stars']:
+                                star_freq[star] += 1
+                        
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.caption("🎱 Numéros principaux")
+                            
+                            # Create DataFrame for better display
+                            main_data = []
+                            for num in range(MAIN_NUM_MIN, MAIN_NUM_MAX + 1):
+                                count = main_freq.get(num, 0)
+                                main_data.append({"Numéro": num, "Fréquence": count, "Taux %": f"{count/len(tickets)*100:.1f}"})
+                            
+                            main_df = pd.DataFrame(main_data)
+                            
+                            # Show most and least used
+                            most_used = main_df.nlargest(5, 'Fréquence')
+                            st.markdown("**Top 5 plus utilisés:**")
+                            st.dataframe(most_used, hide_index=True, use_container_width=True)
+                            
+                            least_used = main_df[main_df['Fréquence'] == 0]
+                            if not least_used.empty:
+                                st.markdown(f"**Non utilisés:** {len(least_used)} numéros")
+                                st.caption(", ".join(str(n) for n in least_used['Numéro'].tolist()))
+                            else:
+                                st.success("✅ Couverture complète!")
+                        
+                        with col2:
+                            st.caption("⭐ Étoiles")
+                            
+                            star_data = []
+                            for star in range(STAR_NUM_MIN, STAR_NUM_MAX + 1):
+                                count = star_freq.get(star, 0)
+                                star_data.append({"Étoile": star, "Fréquence": count, "Taux %": f"{count/len(tickets)*100:.1f}"})
+                            
+                            star_df = pd.DataFrame(star_data)
+                            st.dataframe(star_df, hide_index=True, use_container_width=True)
+                            
+                            unused_stars = star_df[star_df['Fréquence'] == 0]
+                            if not unused_stars.empty:
+                                st.info(f"Non utilisées: {', '.join(str(s) for s in unused_stars['Étoile'].tolist())}")
+                        
+                        # Coverage metrics
+                        total_main_coverage = (len(main_freq) / MAIN_NUM_MAX) * 100
+                        total_star_coverage = (len(star_freq) / STAR_NUM_MAX) * 100
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Couverture numéros", f"{total_main_coverage:.1f}%", f"{len(main_freq)}/{MAIN_NUM_MAX}")
+                        with col2:
+                            st.metric("Couverture étoiles", f"{total_star_coverage:.1f}%", f"{len(star_freq)}/{STAR_NUM_MAX}")
+                    
+                    # Save configuration preset
+                    st.markdown("---")
+                    st.subheader("💾 Sauvegarder cette configuration")
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        preset_name = st.text_input(
+                            "Nom du préréglage",
+                            value=f"{method}_seed{seed}",
+                            key="preset_name_input"
+                        )
+                    with col2:
+                        st.write("")
+                        st.write("")
+                        if st.button("💾 Sauvegarder", use_container_width=True):
+                            config = {
+                                "n_tickets": n_tickets,
+                                "method": method,
+                                "seed": seed,
+                                "use_ensemble": use_ensemble
+                            }
+                            if save_config_preset(preset_name, config):
+                                st.success(f"✅ Configuration '{preset_name}' sauvegardée!")
+                    
+                    # Save for performance tracking
+                    tracking_data = {
+                        "method": method,
+                        "seed": seed,
+                        "n_tickets": n_tickets,
+                        "tickets": tickets[:10]  # Keep first 10 for tracking
                     }
-                    
-                    st.caption(method_explanations.get(method, "Méthode personnalisée"))
+                    save_performance_tracking(tracking_data)
                 
                 else:
                     st.warning("⚠️ Aucun ticket généré. Vérifiez que les modèles sont entraînés.")
                     
             except Exception as e:
                 st.error(f"❌ Erreur lors de la génération: {e}")
+    
+    st.markdown("---")
+    
+    # Section 4.5: Performance Tracking
+    st.header("📈 Suivi de Performance")
+    
+    if st.button("🔄 Actualiser les statistiques", use_container_width=True):
+        with st.spinner("Analyse des performances..."):
+            try:
+                perf_data = check_predictions_vs_draws()
+                
+                if perf_data["total_predictions"] == 0:
+                    st.info("ℹ️ Aucune prédiction à analyser. Générez des tickets pour commencer le suivi.")
+                else:
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric("Prédictions", perf_data["total_predictions"])
+                    with col2:
+                        st.metric("Vérifiées", perf_data["checked"])
+                    with col3:
+                        st.metric("Meilleur match", f"{perf_data['best_match']['main']}+{perf_data['best_match']['stars']}")
+                    with col4:
+                        win_count = len(perf_data["wins"])
+                        st.metric("Gains (2+)", win_count)
+                    
+                    if perf_data["wins"]:
+                        st.subheader("🏆 Historique des gains")
+                        wins_df = pd.DataFrame(perf_data["wins"])
+                        display_wins = wins_df[['date', 'main_matches', 'star_matches']].copy()
+                        display_wins.columns = ['Date', 'Numéros', 'Étoiles']
+                        st.dataframe(display_wins, use_container_width=True, hide_index=True)
+                    
+                    # Performance insights
+                    if perf_data["checked"] > 0:
+                        avg_main = perf_data["total_matches"]["main"] / perf_data["checked"]
+                        avg_stars = perf_data["total_matches"]["stars"] / perf_data["checked"]
+                        
+                        st.info(f"📊 Moyenne par ticket: {avg_main:.2f} numéros corrects, {avg_stars:.2f} étoiles correctes")
+            
+            except Exception as e:
+                st.error(f"❌ Erreur lors de l'analyse: {e}")
     
     st.markdown("---")
     
@@ -1057,10 +2049,8 @@ def main():
         if uploaded_file is not None:
             # Preview file content
             try:
-                # Read a few lines for preview
+                # Read content once
                 import io
-                
-                # Reset file pointer
                 uploaded_file.seek(0)
                 content = uploaded_file.read()
                 
@@ -1068,22 +2058,23 @@ def main():
                 encodings = ['utf-8', 'latin1', 'cp1252']
                 df_preview = None
                 used_encoding = None
+                decoded_content = None
                 
                 for encoding in encodings:
                     try:
-                        uploaded_file.seek(0)
-                        df_preview = pd.read_csv(io.StringIO(content.decode(encoding)), nrows=5)
+                        decoded_content = content.decode(encoding)
+                        df_preview = pd.read_csv(io.StringIO(decoded_content), nrows=5)
                         used_encoding = encoding
                         break
-                    except:
+                    except (UnicodeDecodeError, pd.errors.ParserError):
                         continue
                 
-                if df_preview is not None:
+                if df_preview is not None and decoded_content is not None:
                     st.subheader("Aperçu du fichier")
                     st.dataframe(df_preview, use_container_width=True)
                     
-                    # Calculer le nombre de lignes sans backslash dans f-string
-                    line_count = len(content.decode(used_encoding).split('\n'))
+                    # Use already decoded content
+                    line_count = len(decoded_content.split('\n'))
                     st.caption(f"Encodage détecté: {used_encoding} | Lignes totales: {line_count}")
                     
                     col1, col2 = st.columns(2)
@@ -1242,6 +2233,30 @@ def main():
                 st.subheader("💡 Recommandations")
                 for rec in recommendations:
                     st.info(f"• {rec}")
+            
+            # Smart Alerts
+            st.subheader("🔔 Alertes Intelligentes")
+            
+            from repository import get_repository
+            repo = get_repository()
+            draws = repo.all_draws_df()
+            
+            if not draws.empty:
+                last_draw_date = datetime.fromisoformat(draws.iloc[-1]['draw_date'])
+                days_since = (datetime.now() - last_draw_date).days
+                
+                if days_since > 7:
+                    st.warning(f"⚠️ Dernière mise à jour il y a {days_since} jours - Rafraîchissement recommandé")
+                else:
+                    st.success(f"✅ Données à jour ({days_since} jours)")
+            
+            if status.get("models", {}).get("available"):
+                model_date = status["models"].get("trained_at", "")
+                if model_date:
+                    trained_at = datetime.fromisoformat(model_date.split("T")[0])
+                    days_old = (datetime.now() - trained_at).days
+                    if days_old > 30:
+                        st.warning(f"⚠️ Modèles entraînés il y a {days_old} jours - Réentraînement recommandé")
                     
         except Exception as e:
             st.error(f"❌ Erreur lors de la récupération du statut: {e}")
