@@ -95,7 +95,47 @@ def main():
         
         # Custom training with more epochs
         import tensorflow as tf
-        from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+        from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint, Callback
+        
+        # Custom progress callback for console output
+        class ConsoleProgressCallback(Callback):
+            def __init__(self, phase_name: str, max_epochs: int):
+                super().__init__()
+                self.phase_name = phase_name
+                self.max_epochs = max_epochs
+                self.best_val_loss = float('inf')
+                self.start_time = None
+                
+            def on_train_begin(self, logs=None):
+                import time
+                self.start_time = time.time()
+                logger.info(f"  ⏳ {self.phase_name}: Starting training...")
+                
+            def on_epoch_end(self, epoch, logs=None):
+                import time
+                logs = logs or {}
+                val_loss = logs.get('val_loss', 0)
+                loss = logs.get('loss', 0)
+                improved = ""
+                if val_loss < self.best_val_loss:
+                    self.best_val_loss = val_loss
+                    improved = " ⭐ BEST"
+                    
+                # Progress bar
+                progress = (epoch + 1) / self.max_epochs
+                bar_length = 30
+                filled = int(bar_length * progress)
+                bar = "█" * filled + "░" * (bar_length - filled)
+                
+                elapsed = time.time() - self.start_time
+                eta = (elapsed / (epoch + 1)) * (self.max_epochs - epoch - 1)
+                
+                logger.info(f"  [{bar}] {epoch+1}/{self.max_epochs} | loss: {loss:.4f} | val_loss: {val_loss:.4f}{improved} | ETA: {eta:.0f}s")
+                
+            def on_train_end(self, logs=None):
+                import time
+                elapsed = time.time() - self.start_time
+                logger.info(f"  ✅ {self.phase_name}: Completed in {elapsed:.1f}s | Best val_loss: {self.best_val_loss:.4f}")
         
         # Prepare data
         X_main, y_main, X_star, y_star = lstm.prepare_sequences(df)
@@ -106,44 +146,47 @@ def main():
         lstm.star_model = lstm._build_star_model((args.sequence_length, 12))
         
         # Custom callbacks with more patience for 200 epochs
-        callbacks = [
-            EarlyStopping(
-                patience=args.patience, 
-                restore_best_weights=True, 
-                monitor='val_loss',
-                verbose=1
-            ),
-            ReduceLROnPlateau(
-                factor=0.5, 
-                patience=args.patience // 2, 
-                min_lr=1e-7,
-                verbose=1
-            ),
-            ModelCheckpoint(
-                str(models_dir / "lstm_main_best.keras"),
-                save_best_only=True,
-                monitor='val_loss'
-            )
-        ]
+        def get_callbacks(phase_name: str):
+            return [
+                EarlyStopping(
+                    patience=args.patience, 
+                    restore_best_weights=True, 
+                    monitor='val_loss',
+                    verbose=0
+                ),
+                ReduceLROnPlateau(
+                    factor=0.5, 
+                    patience=args.patience // 2, 
+                    min_lr=1e-7,
+                    verbose=0
+                ),
+                ModelCheckpoint(
+                    str(models_dir / f"lstm_{phase_name.lower()}_best.keras"),
+                    save_best_only=True,
+                    monitor='val_loss',
+                    verbose=0
+                ),
+                ConsoleProgressCallback(phase_name, args.epochs)
+            ]
         
-        logger.info(f"  Training main balls for up to {args.epochs} epochs...")
+        logger.info(f"\n  📊 Training main balls for up to {args.epochs} epochs...")
         main_history = lstm.main_model.fit(
             X_main, y_main,
             validation_split=0.2,
             epochs=args.epochs,
             batch_size=args.batch_size,
-            callbacks=callbacks,
-            verbose=1
+            callbacks=get_callbacks("Main Balls"),
+            verbose=0
         )
         
-        logger.info(f"  Training stars for up to {args.epochs} epochs...")
+        logger.info(f"\n  ⭐ Training stars for up to {args.epochs} epochs...")
         star_history = lstm.star_model.fit(
             X_star, y_star,
             validation_split=0.2,
             epochs=args.epochs,
             batch_size=args.batch_size,
-            callbacks=callbacks,
-            verbose=1
+            callbacks=get_callbacks("Stars"),
+            verbose=0
         )
         
         # Save models
@@ -168,26 +211,100 @@ def main():
         
         transformer = TransformerPredictor(
             sequence_length=args.sequence_length,
-            n_heads=4,
-            ff_dim=128,
+            num_heads=4,
+            dff=128,
             dropout_rate=0.2
         )
         
-        result = transformer.train(
-            df,
+        # Prepare data and build models for manual training with progress
+        X_main, y_main, X_star, y_star = transformer.prepare_sequences(df)
+        logger.info(f"  Data shapes: X_main={X_main.shape}, X_star={X_star.shape}")
+        
+        transformer.main_model = transformer._build_main_model((args.sequence_length, transformer.n_main_balls))
+        transformer.star_model = transformer._build_star_model((args.sequence_length, transformer.n_stars))
+        
+        # Import callbacks (reuse ConsoleProgressCallback if not in scope)
+        from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint, Callback
+        
+        # Define ConsoleProgressCallback if not already defined
+        if 'ConsoleProgressCallback' not in dir():
+            class ConsoleProgressCallback(Callback):
+                def __init__(self, phase_name: str, max_epochs: int):
+                    super().__init__()
+                    self.phase_name = phase_name
+                    self.max_epochs = max_epochs
+                    self.best_val_loss = float('inf')
+                    self.start_time = None
+                    
+                def on_train_begin(self, logs=None):
+                    import time
+                    self.start_time = time.time()
+                    logger.info(f"  ⏳ {self.phase_name}: Starting training...")
+                    
+                def on_epoch_end(self, epoch, logs=None):
+                    import time
+                    logs = logs or {}
+                    val_loss = logs.get('val_loss', 0)
+                    loss = logs.get('loss', 0)
+                    improved = ""
+                    if val_loss < self.best_val_loss:
+                        self.best_val_loss = val_loss
+                        improved = " ⭐ BEST"
+                        
+                    progress = (epoch + 1) / self.max_epochs
+                    bar_length = 30
+                    filled = int(bar_length * progress)
+                    bar = "█" * filled + "░" * (bar_length - filled)
+                    
+                    elapsed = time.time() - self.start_time
+                    eta = (elapsed / (epoch + 1)) * (self.max_epochs - epoch - 1)
+                    
+                    logger.info(f"  [{bar}] {epoch+1}/{self.max_epochs} | loss: {loss:.4f} | val_loss: {val_loss:.4f}{improved} | ETA: {eta:.0f}s")
+                    
+                def on_train_end(self, logs=None):
+                    import time
+                    elapsed = time.time() - self.start_time
+                    logger.info(f"  ✅ {self.phase_name}: Completed in {elapsed:.1f}s | Best val_loss: {self.best_val_loss:.4f}")
+        
+        def get_transformer_callbacks(phase_name: str):
+            return [
+                EarlyStopping(patience=args.patience, restore_best_weights=True, monitor='val_loss', verbose=0),
+                ReduceLROnPlateau(factor=0.5, patience=args.patience // 2, min_lr=1e-7, verbose=0),
+                ConsoleProgressCallback(phase_name, args.epochs)
+            ]
+        
+        logger.info(f"\n  📊 Training main balls for up to {args.epochs} epochs...")
+        main_history = transformer.main_model.fit(
+            X_main, y_main,
             validation_split=0.2,
             epochs=args.epochs,
             batch_size=args.batch_size,
-            verbose=1
+            callbacks=get_transformer_callbacks("Transformer Main"),
+            verbose=0
+        )
+        
+        logger.info(f"\n  ⭐ Training stars for up to {args.epochs} epochs...")
+        star_history = transformer.star_model.fit(
+            X_star, y_star,
+            validation_split=0.2,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            callbacks=get_transformer_callbacks("Transformer Stars"),
+            verbose=0
         )
         
         # Save model
         transformer.save(models_dir / "transformer_predictor")
         
-        results['transformer'] = result
+        results['transformer'] = {
+            'main_epochs': len(main_history.history['loss']),
+            'star_epochs': len(star_history.history['loss']),
+            'main_loss': min(main_history.history['val_loss']),
+            'star_loss': min(star_history.history['val_loss'])
+        }
         logger.info(f"\n✅ Transformer Training Complete:")
-        logger.info(f"   Main balls: {result['main_epochs']} epochs (val_loss: {result['main_loss']:.4f})")
-        logger.info(f"   Stars: {result['star_epochs']} epochs (val_loss: {result['star_loss']:.4f})")
+        logger.info(f"   Main balls: {results['transformer']['main_epochs']} epochs (val_loss: {results['transformer']['main_loss']:.4f})")
+        logger.info(f"   Stars: {results['transformer']['star_epochs']} epochs (val_loss: {results['transformer']['star_loss']:.4f})")
     
     # Summary
     logger.info("\n" + "=" * 60)

@@ -56,7 +56,8 @@ from streamlit_adapters import (
     suggest_tickets_ui,
     fetch_last_draws,
     export_all_draws_csv,
-    get_system_status
+    get_system_status,
+    get_training_progress
 )
 
 # Import backtesting functionality
@@ -1174,38 +1175,111 @@ def main():
                 help="Taille des lots d'entraînement"
             )
         
-        if st.button("🚀 Entraîner Deep Learning", use_container_width=True, type="primary"):
-            with st.spinner(f"Entraînement {dl_model_type.upper()} en cours... (peut prendre plusieurs minutes)"):
+        # Check if training is in progress
+        current_progress = get_training_progress()
+        is_training = current_progress.get("status") in ["training", "starting"]
+        
+        if is_training:
+            # Show live progress
+            st.info("🔄 **Entraînement Deep Learning en cours...**")
+            progress_val = current_progress.get("progress", 0)
+            st.progress(progress_val)
+            
+            phase = current_progress.get("current_phase", "")
+            epoch = current_progress.get("current_epoch", 0)
+            max_ep = current_progress.get("max_epochs", 0)
+            val_loss = current_progress.get("val_loss", 0)
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Phase", phase if phase else "Initialisation")
+            with col2:
+                st.metric("Epoch", f"{epoch}/{max_ep}" if max_ep else "-")
+            with col3:
+                st.metric("Val Loss", f"{val_loss:.4f}" if val_loss else "-")
+            
+            # Add cancel button
+            if st.button("❌ Annuler / Réinitialiser", type="secondary", key="cancel_dl_training"):
+                from pathlib import Path
+                import json
+                progress_file = Path("data/training_progress.json")
+                with open(progress_file, 'w') as f:
+                    json.dump({"status": "idle", "progress": 0, "message": ""}, f)
+                st.rerun()
+            
+            st.caption("⏳ La page se rafraîchit automatiquement toutes les 2 secondes...")
+            
+            # Auto-refresh every 2 seconds
+            import time
+            time.sleep(2)
+            st.rerun()
+        
+        elif st.button("🚀 Entraîner Deep Learning", use_container_width=True, type="primary"):
+            # Start training in a separate thread
+            import threading
+            from pathlib import Path
+            import time
+            
+            # Store parameters in session state for the thread
+            st.session_state['dl_training_params'] = {
+                'epochs': dl_epochs,
+                'model_type': dl_model_type,
+                'patience': dl_patience,
+                'batch_size': dl_batch_size
+            }
+            
+            # Reset progress file
+            progress_file = Path("data/training_progress.json")
+            progress_file.parent.mkdir(parents=True, exist_ok=True)
+            import json
+            with open(progress_file, 'w') as f:
+                json.dump({"status": "starting", "progress": 0, "message": "Démarrage..."}, f)
+            
+            # Get params for thread
+            params = st.session_state['dl_training_params']
+            
+            def run_training():
                 try:
-                    result = train_deep_learning_models(
-                        epochs=dl_epochs,
-                        model_type=dl_model_type,
-                        patience=dl_patience,
-                        batch_size=dl_batch_size
+                    train_deep_learning_models(
+                        epochs=params['epochs'],
+                        model_type=params['model_type'],
+                        patience=params['patience'],
+                        batch_size=params['batch_size']
                     )
-                    
-                    if result.get("success"):
-                        st.success(f"✅ {result['message']}")
-                        
-                        # Display metrics for each model
-                        if result.get("metrics"):
-                            for model_name, metrics in result["metrics"].items():
-                                with st.expander(f"📊 Métriques {model_name.upper()}", expanded=True):
-                                    m_col1, m_col2 = st.columns(2)
-                                    with m_col1:
-                                        st.metric("Epochs boules", metrics.get("main_epochs", "?"))
-                                        st.metric("Val loss boules", f"{metrics.get('main_val_loss', 0):.4f}")
-                                    with m_col2:
-                                        st.metric("Epochs étoiles", metrics.get("star_epochs", "?"))
-                                        st.metric("Val loss étoiles", f"{metrics.get('star_val_loss', 0):.4f}")
-                        
-                        st.info(f"📊 Données utilisées: {result.get('data_size', '?')} tirages")
-                        st.caption("💡 Note: L'arrêt anticipé (EarlyStopping) peut stopper l'entraînement avant le max d'epochs pour éviter le surapprentissage.")
-                    else:
-                        st.error(f"❌ {result['message']}")
-                        
                 except Exception as e:
-                    st.error(f"❌ Erreur: {e}")
+                    # Mark as failed
+                    with open(progress_file, 'w') as f:
+                        json.dump({"status": "error", "progress": 0, "message": str(e)}, f)
+            
+            # Start training thread
+            training_thread = threading.Thread(target=run_training, daemon=True)
+            training_thread.start()
+            
+            st.info("🚀 Entraînement démarré ! La page va se rafraîchir...")
+            time.sleep(1)
+            st.rerun()
+        
+        # Check for completed training
+        elif current_progress.get("status") == "completed":
+            st.success(f"✅ {current_progress.get('message', 'Entraînement terminé!')}")
+            
+            # Reset status after showing
+            if st.button("🔄 Effacer le message", key="clear_dl_status"):
+                progress_file = Path("data/training_progress.json")
+                import json
+                with open(progress_file, 'w') as f:
+                    json.dump({"status": "idle", "progress": 0, "message": ""}, f)
+                st.rerun()
+        
+        elif current_progress.get("status") == "error":
+            st.error(f"❌ Erreur: {current_progress.get('message', 'Erreur inconnue')}")
+            if st.button("🔄 Effacer l'erreur", key="clear_dl_error"):
+                progress_file = Path("data/training_progress.json")
+                import json
+                with open(progress_file, 'w') as f:
+                    json.dump({"status": "idle", "progress": 0, "message": ""}, f)
+                st.rerun()
+            
     else:
         st.warning("⚠️ TensorFlow n'est pas installé")
         st.code("pip install tensorflow==2.18.0", language="bash")

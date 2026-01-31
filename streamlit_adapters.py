@@ -991,8 +991,46 @@ def train_ensemble_models() -> dict:
         }
 
 
+# Training progress file for UI feedback
+TRAINING_PROGRESS_FILE = Path("data/training_progress.json")
+
+def get_training_progress() -> dict:
+    """Get current training progress from file."""
+    try:
+        if TRAINING_PROGRESS_FILE.exists():
+            import json
+            with open(TRAINING_PROGRESS_FILE, 'r') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {"status": "idle", "progress": 0, "message": ""}
+
+def _update_training_progress(status: str, progress: float, message: str, 
+                               current_epoch: int = 0, max_epochs: int = 0,
+                               current_phase: str = "", val_loss: float = 0.0) -> None:
+    """Update training progress file for UI feedback."""
+    try:
+        TRAINING_PROGRESS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        import json
+        data = {
+            "status": status,
+            "progress": min(1.0, max(0.0, progress)),
+            "message": message,
+            "current_epoch": current_epoch,
+            "max_epochs": max_epochs,
+            "current_phase": current_phase,
+            "val_loss": val_loss,
+            "timestamp": pd.Timestamp.now().isoformat()
+        }
+        with open(TRAINING_PROGRESS_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.warning(f"Could not update training progress: {e}")
+
+
 def train_deep_learning_models(epochs: int = 100, model_type: str = 'lstm', 
-                                patience: int = 20, batch_size: int = 32) -> dict:
+                                patience: int = 20, batch_size: int = 32,
+                                progress_callback: Optional[callable] = None) -> dict:
     """
     Train deep learning models (LSTM/Transformer) for lottery prediction.
     
@@ -1001,6 +1039,7 @@ def train_deep_learning_models(epochs: int = 100, model_type: str = 'lstm',
         model_type: 'lstm', 'transformer', or 'all'
         patience: Early stopping patience
         batch_size: Training batch size
+        progress_callback: Optional callback(progress, message) for UI updates
     
     Returns:
         dict with success status, metrics, and training details
@@ -1029,11 +1068,14 @@ def train_deep_learning_models(epochs: int = 100, model_type: str = 'lstm',
         
         # Import TensorFlow callbacks
         import tensorflow as tf
-        from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+        from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, Callback
         from pathlib import Path
         
         models_dir = Path("data/models")
         models_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize progress
+        _update_training_progress("starting", 0.0, "Initialisation de l'entraînement...")
         
         results = {
             "success": True,
@@ -1043,27 +1085,104 @@ def train_deep_learning_models(epochs: int = 100, model_type: str = 'lstm',
             "data_size": len(df)
         }
         
-        callbacks = [
-            EarlyStopping(patience=patience, restore_best_weights=True, monitor='val_loss', verbose=0),
-            ReduceLROnPlateau(factor=0.5, patience=patience // 2, min_lr=1e-7, verbose=0)
-        ]
+        # Custom progress callback with console output
+        class ProgressCallback(Callback):
+            def __init__(self, phase_name: str, phase_offset: float, phase_weight: float, max_epochs: int):
+                super().__init__()
+                self.phase_name = phase_name
+                self.phase_offset = phase_offset
+                self.phase_weight = phase_weight
+                self.max_epochs = max_epochs
+                self.best_val_loss = float('inf')
+                self.start_time = None
+            
+            def on_train_begin(self, logs=None):
+                import time
+                self.start_time = time.time()
+                logger.info(f"⏳ {self.phase_name}: Démarrage de l'entraînement...")
+                
+            def on_epoch_end(self, epoch, logs=None):
+                import time
+                logs = logs or {}
+                val_loss = logs.get('val_loss', 0)
+                loss = logs.get('loss', 0)
+                improved = ""
+                if val_loss < self.best_val_loss:
+                    self.best_val_loss = val_loss
+                    improved = " ⭐"
+                
+                # Calculate progress within this phase
+                epoch_progress = (epoch + 1) / self.max_epochs
+                total_progress = self.phase_offset + (epoch_progress * self.phase_weight)
+                
+                # Progress bar for console
+                bar_length = 20
+                filled = int(bar_length * epoch_progress)
+                bar = "█" * filled + "░" * (bar_length - filled)
+                
+                # ETA calculation
+                elapsed = time.time() - self.start_time if self.start_time else 0
+                eta = (elapsed / (epoch + 1)) * (self.max_epochs - epoch - 1) if epoch > 0 else 0
+                
+                message = f"{self.phase_name}: Epoch {epoch + 1}/{self.max_epochs} - val_loss: {val_loss:.4f}"
+                
+                # Log to console with progress bar
+                logger.info(f"[{bar}] {epoch+1}/{self.max_epochs} | loss: {loss:.4f} | val_loss: {val_loss:.4f}{improved} | ETA: {eta:.0f}s")
+                
+                _update_training_progress(
+                    "training", total_progress, message,
+                    current_epoch=epoch + 1, max_epochs=self.max_epochs,
+                    current_phase=self.phase_name, val_loss=val_loss
+                )
+                
+                if progress_callback:
+                    progress_callback(total_progress, message)
+            
+            def on_train_end(self, logs=None):
+                import time
+                elapsed = time.time() - self.start_time if self.start_time else 0
+                logger.info(f"✅ {self.phase_name}: Terminé en {elapsed:.1f}s | Meilleur val_loss: {self.best_val_loss:.4f}")
+        
+        # Determine number of phases for progress calculation
+        num_phases = 0
+        if model_type in ['lstm', 'all']:
+            num_phases += 2  # main + stars
+        if model_type in ['transformer', 'all']:
+            num_phases += 2  # main + stars
+        phase_weight = 1.0 / num_phases if num_phases > 0 else 0.25
+        current_phase_idx = 0
+        
+        def get_callbacks(phase_name: str) -> list:
+            nonlocal current_phase_idx
+            phase_offset = current_phase_idx * phase_weight
+            current_phase_idx += 1
+            return [
+                EarlyStopping(patience=patience, restore_best_weights=True, monitor='val_loss', verbose=0),
+                ReduceLROnPlateau(factor=0.5, patience=patience // 2, min_lr=1e-7, verbose=0),
+                ProgressCallback(phase_name, phase_offset, phase_weight, epochs)
+            ]
         
         # Train LSTM
         if model_type in ['lstm', 'all']:
             logger.info("Training LSTM model...")
+            _update_training_progress("training", 0.01, "LSTM: Préparation des données...")
+            
             lstm = LSTMPredictor(sequence_length=20, hidden_units=128, dropout_rate=0.3)
             X_main, y_main, X_star, y_star = lstm.prepare_sequences(df)
             
             lstm.main_model = lstm._build_main_model((20, 50))
             lstm.star_model = lstm._build_star_model((20, 12))
             
+            _update_training_progress("training", 0.02, "LSTM: Entraînement des boules principales...")
             main_history = lstm.main_model.fit(
                 X_main, y_main, validation_split=0.2, epochs=epochs,
-                batch_size=batch_size, callbacks=callbacks, verbose=0
+                batch_size=batch_size, callbacks=get_callbacks("LSTM Boules"), verbose=0
             )
+            
+            _update_training_progress("training", current_phase_idx * phase_weight, "LSTM: Entraînement des étoiles...")
             star_history = lstm.star_model.fit(
                 X_star, y_star, validation_split=0.2, epochs=epochs,
-                batch_size=batch_size, callbacks=callbacks, verbose=0
+                batch_size=batch_size, callbacks=get_callbacks("LSTM Étoiles"), verbose=0
             )
             
             lstm.save(models_dir / "lstm_predictor")
@@ -1080,22 +1199,41 @@ def train_deep_learning_models(epochs: int = 100, model_type: str = 'lstm',
         # Train Transformer
         if model_type in ['transformer', 'all']:
             logger.info("Training Transformer model...")
+            _update_training_progress("training", current_phase_idx * phase_weight, "Transformer: Préparation des données...")
+            
             transformer = TransformerPredictor(sequence_length=20, num_heads=4, dff=128)
             
-            result = transformer.train(df, validation_split=0.2, epochs=epochs, 
-                                       batch_size=batch_size, verbose=0)
+            # Manually train with our progress callbacks (transformer.train doesn't support extra_callbacks)
+            X_main, y_main, X_star, y_star = transformer.prepare_sequences(df)
+            
+            transformer.main_model = transformer._build_main_model((20, transformer.n_main_balls))
+            transformer.star_model = transformer._build_star_model((20, transformer.n_stars))
+            
+            _update_training_progress("training", current_phase_idx * phase_weight, "Transformer: Entraînement des boules...")
+            main_history = transformer.main_model.fit(
+                X_main, y_main, validation_split=0.2, epochs=epochs,
+                batch_size=batch_size, callbacks=get_callbacks("Transformer Boules"), verbose=0
+            )
+            
+            _update_training_progress("training", current_phase_idx * phase_weight, "Transformer: Entraînement des étoiles...")
+            star_history = transformer.star_model.fit(
+                X_star, y_star, validation_split=0.2, epochs=epochs,
+                batch_size=batch_size, callbacks=get_callbacks("Transformer Étoiles"), verbose=0
+            )
+            
             transformer.save(models_dir / "transformer_predictor")
             
             results["models_trained"].append("Transformer")
             results["metrics"]["transformer"] = {
-                "main_epochs": result['main_epochs'],
-                "star_epochs": result['star_epochs'],
-                "main_val_loss": result['main_loss'],
-                "star_val_loss": result['star_loss']
+                "main_epochs": len(main_history.history['loss']),
+                "star_epochs": len(star_history.history['loss']),
+                "main_val_loss": min(main_history.history['val_loss']),
+                "star_val_loss": min(star_history.history['val_loss'])
             }
             logger.info(f"Transformer trained: {results['metrics']['transformer']}")
         
         results["message"] = f"Entraînement terminé: {', '.join(results['models_trained'])}"
+        _update_training_progress("completed", 1.0, results["message"])
         return results
         
     except ImportError as e:
