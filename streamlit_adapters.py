@@ -991,6 +991,141 @@ def train_ensemble_models() -> dict:
         }
 
 
+def train_deep_learning_models(epochs: int = 100, model_type: str = 'lstm', 
+                                patience: int = 20, batch_size: int = 32) -> dict:
+    """
+    Train deep learning models (LSTM/Transformer) for lottery prediction.
+    
+    Args:
+        epochs: Maximum number of training epochs
+        model_type: 'lstm', 'transformer', or 'all'
+        patience: Early stopping patience
+        batch_size: Training batch size
+    
+    Returns:
+        dict with success status, metrics, and training details
+    """
+    try:
+        from deep_learning_models import TF_AVAILABLE, LSTMPredictor, TransformerPredictor
+        
+        if not TF_AVAILABLE:
+            return {
+                "success": False,
+                "message": "TensorFlow n'est pas installé. Installez avec: pip install tensorflow==2.18.0",
+                "tf_available": False
+            }
+        
+        # Load data
+        repo = get_repository()
+        df = repo.all_draws_df()
+        
+        if df.empty or len(df) < 70:
+            return {
+                "success": False,
+                "message": f"Pas assez de données pour l'entraînement deep learning (minimum 70, actuel: {len(df)})"
+            }
+        
+        logger.info(f"Starting deep learning training: {model_type}, epochs={epochs}, patience={patience}")
+        
+        # Import TensorFlow callbacks
+        import tensorflow as tf
+        from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+        from pathlib import Path
+        
+        models_dir = Path("data/models")
+        models_dir.mkdir(parents=True, exist_ok=True)
+        
+        results = {
+            "success": True,
+            "message": "",
+            "models_trained": [],
+            "metrics": {},
+            "data_size": len(df)
+        }
+        
+        callbacks = [
+            EarlyStopping(patience=patience, restore_best_weights=True, monitor='val_loss', verbose=0),
+            ReduceLROnPlateau(factor=0.5, patience=patience // 2, min_lr=1e-7, verbose=0)
+        ]
+        
+        # Train LSTM
+        if model_type in ['lstm', 'all']:
+            logger.info("Training LSTM model...")
+            lstm = LSTMPredictor(sequence_length=20, hidden_units=128, dropout_rate=0.3)
+            X_main, y_main, X_star, y_star = lstm.prepare_sequences(df)
+            
+            lstm.main_model = lstm._build_main_model((20, 50))
+            lstm.star_model = lstm._build_star_model((20, 12))
+            
+            main_history = lstm.main_model.fit(
+                X_main, y_main, validation_split=0.2, epochs=epochs,
+                batch_size=batch_size, callbacks=callbacks, verbose=0
+            )
+            star_history = lstm.star_model.fit(
+                X_star, y_star, validation_split=0.2, epochs=epochs,
+                batch_size=batch_size, callbacks=callbacks, verbose=0
+            )
+            
+            lstm.save(models_dir / "lstm_predictor")
+            
+            results["models_trained"].append("LSTM")
+            results["metrics"]["lstm"] = {
+                "main_epochs": len(main_history.history['loss']),
+                "star_epochs": len(star_history.history['loss']),
+                "main_val_loss": min(main_history.history['val_loss']),
+                "star_val_loss": min(star_history.history['val_loss'])
+            }
+            logger.info(f"LSTM trained: {results['metrics']['lstm']}")
+        
+        # Train Transformer
+        if model_type in ['transformer', 'all']:
+            logger.info("Training Transformer model...")
+            transformer = TransformerPredictor(sequence_length=20, num_heads=4, dff=128)
+            
+            result = transformer.train(df, validation_split=0.2, epochs=epochs, 
+                                       batch_size=batch_size, verbose=0)
+            transformer.save(models_dir / "transformer_predictor")
+            
+            results["models_trained"].append("Transformer")
+            results["metrics"]["transformer"] = {
+                "main_epochs": result['main_epochs'],
+                "star_epochs": result['star_epochs'],
+                "main_val_loss": result['main_loss'],
+                "star_val_loss": result['star_loss']
+            }
+            logger.info(f"Transformer trained: {results['metrics']['transformer']}")
+        
+        results["message"] = f"Entraînement terminé: {', '.join(results['models_trained'])}"
+        return results
+        
+    except ImportError as e:
+        logger.warning(f"Deep learning import error: {e}")
+        return {
+            "success": False,
+            "message": f"Module deep learning non disponible: {str(e)}",
+            "tf_available": False
+        }
+    except Exception as e:
+        logger.error(f"Error training deep learning models: {e}")
+        return {
+            "success": False,
+            "message": f"Erreur lors de l'entraînement: {str(e)}"
+        }
+
+
+def is_deep_learning_available() -> dict:
+    """Check if deep learning (TensorFlow) is available."""
+    try:
+        from deep_learning_models import TF_AVAILABLE
+        import tensorflow as tf
+        return {
+            "available": TF_AVAILABLE,
+            "version": tf.__version__ if TF_AVAILABLE else None
+        }
+    except ImportError:
+        return {"available": False, "version": None}
+
+
 def fetch_last_draws(limit: int = 20) -> pd.DataFrame:
     """Fetch recent draws."""
     return streamlit_adapters.fetch_last_draws(limit)

@@ -49,6 +49,8 @@ from streamlit_adapters import (
     update_incremental,
     train_from_scratch,
     train_ensemble_models,
+    train_deep_learning_models,
+    is_deep_learning_available,
     reload_models,
     get_scores,
     suggest_tickets_ui,
@@ -1123,6 +1125,91 @@ def main():
                         
                 except Exception as e:
                     st.error(f"❌ Erreur lors du rechargement: {e}")
+    
+    # Deep Learning Section
+    st.subheader("🧠 Deep Learning (LSTM/Transformer)")
+    
+    # Check TensorFlow availability
+    dl_status = is_deep_learning_available()
+    
+    if dl_status.get("available"):
+        st.success(f"✅ TensorFlow {dl_status.get('version', '?')} disponible")
+        
+        # Configuration options
+        dl_col1, dl_col2, dl_col3, dl_col4 = st.columns(4)
+        
+        with dl_col1:
+            dl_model_type = st.selectbox(
+                "Type de modèle",
+                options=["lstm", "transformer", "all"],
+                format_func=lambda x: {"lstm": "🔄 LSTM", "transformer": "🤖 Transformer", "all": "📦 Tous"}[x],
+                help="LSTM: Réseaux récurrents | Transformer: Attention | Tous: Les deux modèles"
+            )
+        
+        with dl_col2:
+            dl_epochs = st.number_input(
+                "Epochs max",
+                min_value=10,
+                max_value=500,
+                value=100,
+                step=10,
+                help="Nombre maximum d'epochs (arrêt anticipé si pas d'amélioration)"
+            )
+        
+        with dl_col3:
+            dl_patience = st.number_input(
+                "Patience",
+                min_value=5,
+                max_value=50,
+                value=20,
+                step=5,
+                help="Nombre d'epochs sans amélioration avant arrêt"
+            )
+        
+        with dl_col4:
+            dl_batch_size = st.selectbox(
+                "Batch size",
+                options=[16, 32, 64, 128],
+                index=1,
+                help="Taille des lots d'entraînement"
+            )
+        
+        if st.button("🚀 Entraîner Deep Learning", use_container_width=True, type="primary"):
+            with st.spinner(f"Entraînement {dl_model_type.upper()} en cours... (peut prendre plusieurs minutes)"):
+                try:
+                    result = train_deep_learning_models(
+                        epochs=dl_epochs,
+                        model_type=dl_model_type,
+                        patience=dl_patience,
+                        batch_size=dl_batch_size
+                    )
+                    
+                    if result.get("success"):
+                        st.success(f"✅ {result['message']}")
+                        
+                        # Display metrics for each model
+                        if result.get("metrics"):
+                            for model_name, metrics in result["metrics"].items():
+                                with st.expander(f"📊 Métriques {model_name.upper()}", expanded=True):
+                                    m_col1, m_col2 = st.columns(2)
+                                    with m_col1:
+                                        st.metric("Epochs boules", metrics.get("main_epochs", "?"))
+                                        st.metric("Val loss boules", f"{metrics.get('main_val_loss', 0):.4f}")
+                                    with m_col2:
+                                        st.metric("Epochs étoiles", metrics.get("star_epochs", "?"))
+                                        st.metric("Val loss étoiles", f"{metrics.get('star_val_loss', 0):.4f}")
+                        
+                        st.info(f"📊 Données utilisées: {result.get('data_size', '?')} tirages")
+                        st.caption("💡 Note: L'arrêt anticipé (EarlyStopping) peut stopper l'entraînement avant le max d'epochs pour éviter le surapprentissage.")
+                    else:
+                        st.error(f"❌ {result['message']}")
+                        
+                except Exception as e:
+                    st.error(f"❌ Erreur: {e}")
+    else:
+        st.warning("⚠️ TensorFlow n'est pas installé")
+        st.code("pip install tensorflow==2.18.0", language="bash")
+        st.caption("Installez TensorFlow pour activer les modèles LSTM et Transformer")
     
     st.markdown("---")
     
