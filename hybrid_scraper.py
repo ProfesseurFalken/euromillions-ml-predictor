@@ -142,8 +142,13 @@ def get_best_available_draws(limit: int = 20) -> List[Dict[str, Any]]:
     Get the best available draws using multiple strategies.
     
     This is the recommended function to use for getting EuroMillions data.
+    Priority order:
+    1. Robust scraper (most reliable, parses euro-millions.com correctly)
+    2. Hybrid scraper (fallback)
+    3. Original scraper (legacy fallback)
     """
     strategies = [
+        ("robust", lambda: _try_robust_scraper(limit)),
         ("hybrid", lambda: hybrid_scrape_latest(limit=limit)),
         ("original_only", lambda: _try_original_only(limit)),
         ("enhanced_only", lambda: _try_enhanced_only(limit)),
@@ -155,8 +160,12 @@ def get_best_available_draws(limit: int = 20) -> List[Dict[str, Any]]:
             draws = strategy_func()
             
             if draws and len(draws) > 0:
-                logger.info(f"✅ Strategy '{strategy_name}' succeeded with {len(draws)} draws")
-                return draws
+                # Validate the draws have correct dates
+                if _validate_draw_dates(draws):
+                    logger.info(f"✅ Strategy '{strategy_name}' succeeded with {len(draws)} valid draws")
+                    return draws
+                else:
+                    logger.warning(f"⚠️ Strategy '{strategy_name}' returned draws with invalid dates")
             else:
                 logger.warning(f"⚠️ Strategy '{strategy_name}' returned no draws")
                 
@@ -166,6 +175,13 @@ def get_best_available_draws(limit: int = 20) -> List[Dict[str, Any]]:
     
     logger.error("🚨 All scraping strategies failed!")
     return []
+
+
+def _try_robust_scraper(limit: int) -> List[Dict[str, Any]]:
+    """Try the robust scraper (most reliable)."""
+    from robust_scraper import RobustEuromillionsScraper
+    scraper = RobustEuromillionsScraper()
+    return scraper.scrape_latest(limit=limit)
 
 
 def _try_original_only(limit: int) -> List[Dict[str, Any]]:
@@ -180,6 +196,37 @@ def _try_enhanced_only(limit: int) -> List[Dict[str, Any]]:
     from enhanced_scraper import EnhancedEuromillionsScraper
     scraper = EnhancedEuromillionsScraper()
     return scraper.scrape_latest_draws(limit=limit)
+
+
+def _validate_draw_dates(draws: List[Dict[str, Any]]) -> bool:
+    """Validate that draws have correct dates (Tuesday or Friday)."""
+    from datetime import datetime
+    
+    if not draws:
+        return False
+    
+    valid_count = 0
+    for draw in draws[:5]:  # Check first 5 draws
+        try:
+            date_str = draw.get('draw_date', '')
+            if not date_str:
+                continue
+            
+            # Parse date (handle both formats)
+            if len(date_str) >= 10:
+                date_str = date_str[:10]  # Get YYYY-MM-DD part
+            
+            date = datetime.strptime(date_str, '%Y-%m-%d')
+            
+            # Check if Tuesday (1) or Friday (4)
+            if date.weekday() in [1, 4]:
+                valid_count += 1
+                
+        except (ValueError, TypeError):
+            continue
+    
+    # Valid if at least 80% of checked draws have correct dates
+    return valid_count >= len(draws[:5]) * 0.8
 
 
 # Convenience functions for backward compatibility
