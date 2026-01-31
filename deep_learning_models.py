@@ -53,9 +53,11 @@ try:
     Adam = _Adam
     
     TF_AVAILABLE = True
-    logger.info(f"TensorFlow {tf.__version__} available")
-except ImportError:
-    logger.warning("TensorFlow not available - deep learning models disabled")
+    logger.info(f"TensorFlow {_tf.__version__} available")
+except ImportError as e:
+    logger.warning(f"TensorFlow not available - deep learning models disabled: {e}")
+except Exception as e:
+    logger.warning(f"TensorFlow import error ({type(e).__name__}): {e}")
 
 # Check for PyTorch availability as alternative
 TORCH_AVAILABLE = False
