@@ -680,5 +680,5 @@ python -m pytest test_*.py -v
 
 **Version:** 4.0.0  
 **Dernière MAJ:** Janvier 2024  
-**Auteur:** AI Engineer Assistant  
+**Auteur:** ProfesseurFalken  
 **Status:** ✅ Stable & Production Ready

@@ -316,7 +316,7 @@ improved models instead of basic ones.
 
 ---
 
-**Developed by:** AI Systems Engineer
+**Developed by:** ProfesseurFalken
 **Date:** November 16, 2025
 **Version:** 2.0
 **Status:** Production Ready

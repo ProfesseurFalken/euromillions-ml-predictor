@@ -294,27 +294,49 @@ def get_next_draw_info() -> dict:
         "date_str": next_draw.strftime("%d/%m/%Y")
     }
 
+def _convert_for_json(obj):
+    """Convert numpy types and other non-serializable types for JSON."""
+    import numpy as np
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: _convert_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_for_json(item) for item in obj]
+    return obj
+
 def save_performance_tracking(prediction: dict):
     """Save a prediction for performance tracking."""
-    tracking_file = Path("data/performance_tracking.json")
-    tracking_file.parent.mkdir(exist_ok=True)
-    
-    predictions = []
-    if tracking_file.exists():
-        with open(tracking_file, 'r', encoding='utf-8') as f:
-            predictions = json.load(f)
-    
-    predictions.append({
-        **prediction,
-        "id": hashlib.md5(json.dumps(prediction, sort_keys=True).encode()).hexdigest()[:8],
-        "created_at": datetime.now().isoformat()
-    })
-    
-    # Keep only last 100 predictions
-    predictions = predictions[-100:]
-    
-    with open(tracking_file, 'w', encoding='utf-8') as f:
-        json.dump(predictions, f, indent=2)
+    try:
+        tracking_file = Path("data/performance_tracking.json")
+        tracking_file.parent.mkdir(exist_ok=True)
+        
+        # Convert numpy types to native Python types
+        prediction = _convert_for_json(prediction)
+        
+        predictions = []
+        if tracking_file.exists():
+            with open(tracking_file, 'r', encoding='utf-8') as f:
+                predictions = json.load(f)
+        
+        predictions.append({
+            **prediction,
+            "id": hashlib.md5(json.dumps(prediction, sort_keys=True, default=str).encode()).hexdigest()[:8],
+            "created_at": datetime.now().isoformat()
+        })
+        
+        # Keep only last 100 predictions
+        predictions = predictions[-100:]
+        
+        with open(tracking_file, 'w', encoding='utf-8') as f:
+            json.dump(predictions, f, indent=2, default=str)
+    except Exception as e:
+        # Don't fail ticket generation just because tracking failed
+        pass
 
 def load_performance_tracking() -> list:
     """Load performance tracking data."""
@@ -1846,8 +1868,8 @@ def main():
                         "generated_at": datetime.now().isoformat(),
                         "method": method,
                         "seed": seed,
-                        "tickets": tickets
-                    }, indent=2, ensure_ascii=False)
+                        "tickets": _convert_for_json(tickets)
+                    }, indent=2, ensure_ascii=False, default=str)
                     
                     # Download buttons
                     col1, col2, col3, col4 = st.columns(4)
